@@ -1,0 +1,20 @@
+[package]
+name = "yee_player"
+version = "0.1.0"
+authors = ["OTOMariK"]
+edition = "2018"
+
+[dependencies]
+log = "*"
+env_logger = "*"
+
+winit = "0.20"
+raw-window-handle = "*"
+wgpu = "*"
+
+legion = "*"
+
+rodio = "*"
+
+ron = "*"
+serde= "*"

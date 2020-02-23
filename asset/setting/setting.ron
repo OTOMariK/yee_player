@@ -1,0 +1,10 @@
+(
+    // width of the window  窗口的宽度
+    window_width: 512.0,
+    // height of the window  窗口的高度
+    window_height: 512.0,
+    // max playback speed when moving the speed slider  移动速度滑块时可以调节的最大播放速度
+    max_speed: 2.0,
+    // min playback speed when moving the speed slider  移动速度滑块时可以调节的最低播放速度
+    min_speed: -2.0,
+)
