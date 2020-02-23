@@ -1,5 +1,5 @@
 <p>
-  <img src="asset/icon.png", width="64", >
+  <img src="asset/icon.png">
 </p>
 
 # Yee Player
@@ -16,9 +16,9 @@ simple music player written in Rust
 
 `播放/暂停按钮` 和 `倒放按钮` 通过改变播放速度来实现其功能
 
-`load music button` will read `asset/setting/music_path.txt` to locate the music file
+`load music button` will read [`asset/setting/music_path.txt`](asset/setting/music_path.txt) to locate the music file
 
-`加载音乐按钮`会读取`asset/setting/music_path.txt`文件中指定的路径来寻找要加载的音乐文件
+`加载音乐按钮`会读取[`asset/setting/music_path.txt`](asset/setting/music_path.txt)文件中指定的路径来寻找要加载的音乐文件
 
 this program will load the whole audio data into memory, loading long audio file may crash
 
@@ -30,9 +30,9 @@ you can change some setting by editing `asset/setting/setting.ron`
 
 你可以在`asset/setting/setting.ron`文件中修改程序的一些设置
 
-feilds of `setting.ron`:
+feilds of [`setting.ron`](asset/setting/setting.ron):
 
-`setting.ron`中的参数：
+[`setting.ron`](asset/setting/setting.ron)中的参数：
 
     // width of the window  窗口的宽度
     window_width: f32
@@ -49,10 +49,10 @@ this project mainly uses the following crates
 
 本工程主要使用了以下库
 
-* `winit`: input handling and window creating  处理用户输入以及创建窗口
+* [`winit`](https://crates.io/crates/winit): input handling and window creating  处理用户输入以及创建窗口
 
-* `wgpu`: graphics rendering  图像渲染
+* [`wgpu`](https://crates.io/crates/wgpu): graphics rendering  图像渲染
 
-* `legion`: logic construction  逻辑处理
+* [`legion`](https://crates.io/crates/legion): logic construction  逻辑处理
 
-* `rodio`: audio decoding and playing  音频解码与播放
+* [`rodio`](https://crates.io/crates/rodio): audio decoding and playing  音频解码与播放
