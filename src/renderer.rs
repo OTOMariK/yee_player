@@ -1,4 +1,6 @@
-#[derive(Debug, Clone, Copy)]
+use zerocopy::{AsBytes, FromBytes};
+
+#[derive(Debug, Clone, Copy, AsBytes, FromBytes)]
 #[repr(C)]
 struct Vertex {
     position: [f32; 2],
@@ -26,7 +28,7 @@ const VERTEX: [Vertex; 4] = [
 
 const INDECES: [u16; 6] = [1, 2, 0, 0, 2, 3];
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct Transform {
     pub location: [f32; 2],
@@ -52,7 +54,7 @@ pub struct PiplineSetting {
 
 pub struct Renderer {
     surface: wgpu::Surface,
-    adapter: wgpu::Adapter,
+    _adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     swap_chain_desc: wgpu::SwapChainDescriptor,
@@ -70,22 +72,29 @@ impl Renderer {
     ) -> Result<Self, String> {
         let surface = wgpu::Surface::create(window);
 
-        let adapter = wgpu::Adapter::request(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::Default,
-            backends: wgpu::BackendBit::PRIMARY,
-        })
+        let adapter = futures::executor::block_on(wgpu::Adapter::request(
+            &wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::Default,
+                compatible_surface: None,
+            },
+            wgpu::BackendBit::PRIMARY,
+        ))
         .ok_or("no adapter found!")?;
 
-        let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
-            extensions: wgpu::Extensions {
-                anisotropic_filtering: false,
-            },
-            limits: wgpu::Limits::default(),
-        });
+        let (device, queue) =
+            futures::executor::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                extensions: wgpu::Extensions {
+                    anisotropic_filtering: false,
+                },
+                limits: wgpu::Limits::default(),
+            }));
 
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { bindings: &[] });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            bindings: &[],
+        });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
             layout: &bind_group_layout,
             bindings: &[],
         });
@@ -95,23 +104,19 @@ impl Renderer {
             format: wgpu::TextureFormat::Bgra8Unorm,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Vsync,
+            present_mode: wgpu::PresentMode::Mailbox,
         };
         let swap_chain = device.create_swap_chain(&surface, &swap_chain_desc);
         let (vertex_buffer, index_buffer) = {
-            let vb = device
-                .create_buffer_mapped(VERTEX.len(), wgpu::BufferUsage::VERTEX)
-                .fill_from_slice(&VERTEX);
+            let vb = device.create_buffer_with_data(VERTEX.as_bytes(), wgpu::BufferUsage::VERTEX);
 
-            let ib = device
-                .create_buffer_mapped(INDECES.len(), wgpu::BufferUsage::INDEX)
-                .fill_from_slice(&INDECES);
+            let ib = device.create_buffer_with_data(INDECES.as_bytes(), wgpu::BufferUsage::INDEX);
             (vb, ib)
         };
 
         Ok(Renderer {
             surface,
-            adapter,
+            _adapter: adapter,
             device,
             queue,
             swap_chain_desc,
@@ -179,66 +184,73 @@ impl Renderer {
                     alpha_blend: wgpu::BlendDescriptor::REPLACE,
                     write_mask: wgpu::ColorWrite::ALL,
                 }],
+                vertex_state: wgpu::VertexStateDescriptor {
+                    index_format: wgpu::IndexFormat::Uint16,
+                    vertex_buffers: &[
+                        wgpu::VertexBufferDescriptor {
+                            stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                            step_mode: wgpu::InputStepMode::Vertex,
+                            attributes: &[
+                                wgpu::VertexAttributeDescriptor {
+                                    offset: 0,
+                                    format: wgpu::VertexFormat::Float2,
+                                    shader_location: 0,
+                                },
+                                wgpu::VertexAttributeDescriptor {
+                                    offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                                    format: wgpu::VertexFormat::Float2,
+                                    shader_location: 1,
+                                },
+                            ],
+                        },
+                        wgpu::VertexBufferDescriptor {
+                            stride: std::mem::size_of::<Transform>() as wgpu::BufferAddress,
+                            step_mode: wgpu::InputStepMode::Instance,
+                            attributes: &[
+                                wgpu::VertexAttributeDescriptor {
+                                    offset: 0,
+                                    format: wgpu::VertexFormat::Float2,
+                                    shader_location: 2,
+                                },
+                                wgpu::VertexAttributeDescriptor {
+                                    offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                                    format: wgpu::VertexFormat::Float2,
+                                    shader_location: 3,
+                                },
+                                wgpu::VertexAttributeDescriptor {
+                                    offset: (std::mem::size_of::<[f32; 2]>()
+                                        + std::mem::size_of::<[f32; 2]>())
+                                        as wgpu::BufferAddress,
+                                    format: wgpu::VertexFormat::Float3,
+                                    shader_location: 4,
+                                },
+                            ],
+                        },
+                    ],
+                },
                 depth_stencil_state: None,
-                index_format: wgpu::IndexFormat::Uint16,
-                vertex_buffers: &[
-                    wgpu::VertexBufferDescriptor {
-                        stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                        step_mode: wgpu::InputStepMode::Vertex,
-                        attributes: &[
-                            wgpu::VertexAttributeDescriptor {
-                                offset: 0,
-                                format: wgpu::VertexFormat::Float3,
-                                shader_location: 0,
-                            },
-                            wgpu::VertexAttributeDescriptor {
-                                offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                                format: wgpu::VertexFormat::Float2,
-                                shader_location: 1,
-                            },
-                        ],
-                    },
-                    wgpu::VertexBufferDescriptor {
-                        stride: std::mem::size_of::<Transform>() as wgpu::BufferAddress,
-                        step_mode: wgpu::InputStepMode::Instance,
-                        attributes: &[
-                            wgpu::VertexAttributeDescriptor {
-                                offset: 0,
-                                format: wgpu::VertexFormat::Float2,
-                                shader_location: 2,
-                            },
-                            wgpu::VertexAttributeDescriptor {
-                                offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                                format: wgpu::VertexFormat::Float2,
-                                shader_location: 3,
-                            },
-                            wgpu::VertexAttributeDescriptor {
-                                offset: (std::mem::size_of::<[f32; 2]>()
-                                    + std::mem::size_of::<[f32; 2]>())
-                                    as wgpu::BufferAddress,
-                                format: wgpu::VertexFormat::Float3,
-                                shader_location: 4,
-                            },
-                        ],
-                    },
-                ],
                 sample_count: 1,
                 sample_mask: !0,
                 alpha_to_coverage_enabled: false,
             }))
     }
 
-    pub fn render(&mut self, transforms: &[Transform], render_pipeline: &wgpu::RenderPipeline) {
-        let frame = self.swap_chain.get_next_texture();
+    pub fn render(
+        &mut self,
+        transforms: &[Transform],
+        render_pipeline: &wgpu::RenderPipeline,
+    ) -> Result<(), String> {
+        let frame = self
+            .swap_chain
+            .get_next_texture()
+            .map_err(|e| format!("{:?}", e))?;
 
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { todo: 0 });
-
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         let transform_buffer = self
             .device
-            .create_buffer_mapped(transforms.len(), wgpu::BufferUsage::VERTEX)
-            .fill_from_slice(&transforms);
+            .create_buffer_with_data(transforms.as_bytes(), wgpu::BufferUsage::VERTEX);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -253,11 +265,13 @@ impl Renderer {
             });
             render_pass.set_pipeline(render_pipeline);
             render_pass.set_bind_group(0, &self.bind_group, &[]);
-            render_pass.set_vertex_buffers(0, &[(&self.vertex_buffer, 0), (&transform_buffer, 0)]);
-            render_pass.set_index_buffer(&self.index_buffer, 0);
+            render_pass.set_vertex_buffer(0, &self.vertex_buffer, 0, 0);
+            render_pass.set_vertex_buffer(1, &transform_buffer, 0, 0);
+            render_pass.set_index_buffer(&self.index_buffer, 0, 0);
             render_pass.draw_indexed(0..INDECES.len() as u32, 0, 0..transforms.len() as u32);
         }
 
         self.queue.submit(&[encoder.finish()]);
+        Ok(())
     }
 }

@@ -5,10 +5,11 @@ authors = ["OTOMariK"]
 edition = "2018"
 
 [dependencies]
+lazy_static = "*"
 log = "*"
 env_logger = "*"
 
-winit = "0.20"
+winit = "0.22"
 raw-window-handle = "*"
 wgpu = "*"
 
@@ -18,3 +19,6 @@ rodio = "*"
 
 ron = "*"
 serde= "*"
+zerocopy= "*"
+
+futures="*"

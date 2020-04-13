@@ -30,7 +30,7 @@ pub fn create_icon_data() -> Vec<u8> {
         (SLIDER_COLOR.hover_color[2] * 255.0) as u8,
         255,
     ];
-    
+    #[rustfmt::skip]
     let pixels = vec![
         nb.clone(), nb.clone(), nb.clone(), nb.clone(), nb.clone(), nb.clone(), nb.clone(), nb.clone(), lb.clone(), lb.clone(), lb.clone(), lb.clone(), nb.clone(), nb.clone(), nb.clone(), nb.clone(), 
         nb.clone(), nb.clone(), nb.clone(), nb.clone(), nb.clone(), nb.clone(), nb.clone(), nb.clone(), lb.clone(), lb.clone(), lb.clone(), lb.clone(), nb.clone(), nb.clone(), nb.clone(), nb.clone(), 

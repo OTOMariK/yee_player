@@ -1,8 +1,8 @@
-#![windows_subsystem = "windows"]
+// #![windows_subsystem = "windows"]
 
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, str::FromStr, sync::Arc};
 
-mod entity;
+pub mod entity;
 use entity::{
     audio::{AudioBufferLoader, AudioController},
     button::{ButtonColors, ButtonResponse, ButtonState, StateButton},
@@ -23,10 +23,35 @@ use icon::create_icon_data;
 // MARK: consts
 const FRAME_GAP: std::time::Duration = std::time::Duration::from_nanos(0_016_666_667);
 
-const FRAGMENT_SHADER_PATH: &str = "./asset/shader/frag.glsl.spv";
-const VERTEX_SHADER_PATH: &str = "./asset/shader/vert.glsl.spv";
-const SETTING_PATH: &str = "asset/setting/setting.ron";
-const PATH_OF_MUSIC_PATH: &str = "asset/setting/music_path.txt";
+#[macro_use]
+extern crate lazy_static;
+lazy_static! {
+    static ref FRAGMENT_SHADER_PATH: PathBuf =
+        execute_or_relative_path("./asset/shader/frag.glsl.spv").unwrap();
+    static ref VERTEX_SHADER_PATH: PathBuf =
+        execute_or_relative_path("./asset/shader/vert.glsl.spv").unwrap();
+    static ref SETTING_PATH: PathBuf =
+        execute_or_relative_path("./asset/setting/setting.ron").unwrap();
+    static ref PATH_OF_MUSIC_PATH: PathBuf =
+        execute_or_relative_path("./asset/setting/music_path.txt").unwrap();
+}
+
+fn execute_or_relative_path(path: &str) -> Option<PathBuf> {
+    if let Some(relative_path) = PathBuf::from_str(path).ok() {
+        let exe_path = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(relative_path.clone());
+        if exe_path.exists() {
+            Some(exe_path)
+        } else {
+            Some(relative_path)
+        }
+    } else {
+        None
+    }
+}
 
 pub const NORMAL_BUTTON_COLOR: ButtonColors = ButtonColors {
     base_color: [0.0, 0.27, 0.5],
@@ -87,13 +112,13 @@ fn main() -> Result<(), String> {
         .init();
 
     let setting: Setting = {
-        let string = std::fs::read_to_string(SETTING_PATH).map_err(|e| {
-            let err = format!("error opening {}: {:?}", SETTING_PATH, e);
+        let string = std::fs::read_to_string(&*SETTING_PATH).map_err(|e| {
+            let err = format!("error opening {:?}: {:?}", &*SETTING_PATH, e);
             log::error!("{}", err);
             err
         })?;
         ron::de::from_str(string.as_str()).map_err(|e| {
-            let err = format!("error parsing {}: {:?}", SETTING_PATH, e);
+            let err = format!("error parsing {:?}: {:?}", &*SETTING_PATH, e);
             log::error!("{}", err);
             err
         })?
@@ -131,8 +156,8 @@ fn main() -> Result<(), String> {
 
     let mut renderer = Renderer::init(&window, size)?;
     let render_pipeline = renderer.create_render_pipline(&PiplineSetting {
-        vertex_shader_path: VERTEX_SHADER_PATH.to_string().into(),
-        fragment_shader_path: FRAGMENT_SHADER_PATH.to_string().into(),
+        vertex_shader_path: VERTEX_SHADER_PATH.clone(),
+        fragment_shader_path: FRAGMENT_SHADER_PATH.clone(),
     })?;
 
     let audio_device = Arc::new(buffer_player::create_on_other_thread(|| -> _ {
@@ -212,35 +237,11 @@ fn main() -> Result<(), String> {
         }) as ButtonFn;
 
         let load_fn = Arc::new(|world: &mut World, self_entity: Entity| {
-            let file_path = std::fs::read_to_string(PATH_OF_MUSIC_PATH);
+            let file_path = std::fs::read_to_string(&*PATH_OF_MUSIC_PATH);
             match file_path {
                 Err(e) => log::error!("error reading setting: {}", e),
                 Ok(path) => {
-                    log::info!("loading {:?}", path);
-                    world.insert(
-                        (),
-                        vec![(AudioBufferLoader::load(path), Spawner(self_entity))],
-                    );
-
-                    let stop_load_fn =
-                        &Read::<ButtonFunctions>::fetch(&world.resources).stop_load_fn;
-                    if let Some(mut self_fn) = world.get_component_mut::<ButtonFn>(self_entity) {
-                        *self_fn = Arc::clone(stop_load_fn);
-                    }
-
-                    if let Some(mut colors) = world.get_component_mut::<ButtonColors>(self_entity) {
-                        *colors = LOADING_BUTTON_COLOR;
-                    }
-
-                    if let Some(mut slider) = world.get_component_mut::<Slider>(self_entity) {
-                        slider.set_value(0.0);
-                    }
-
-                    if let Some(mut target_value) =
-                        world.get_component_mut::<TargetValue>(self_entity)
-                    {
-                        target_value.0 = 0.0;
-                    }
+                    function::load(world, self_entity, path);
                 }
             }
         }) as ButtonFn;
@@ -278,7 +279,7 @@ fn main() -> Result<(), String> {
                     StateButton::new(),
                     NORMAL_BUTTON_COLOR,
                     Transform {
-                        location: [-1.0, -1.0],
+                        location: [-1.0, 0.5],
                         size: [0.5, 0.5],
                         color: NORMAL_BUTTON_COLOR.base_color,
                     },
@@ -288,7 +289,7 @@ fn main() -> Result<(), String> {
                     StateButton::new(),
                     NORMAL_BUTTON_COLOR,
                     Transform {
-                        location: [-0.5, -1.0],
+                        location: [-0.5, 0.5],
                         size: [0.5, 0.5],
                         color: NORMAL_BUTTON_COLOR.base_color,
                     },
@@ -303,7 +304,7 @@ fn main() -> Result<(), String> {
                     StateButton::new(),
                     NORMAL_BUTTON_COLOR,
                     Transform {
-                        location: [0.0, -1.0],
+                        location: [0.0, 0.5],
                         size: [0.5, 0.5],
                         color: NORMAL_BUTTON_COLOR.base_color,
                     },
@@ -323,7 +324,7 @@ fn main() -> Result<(), String> {
                     state_colors: NORMAL_BUTTON_COLOR,
                 },
                 Transform {
-                    location: [0.5, -1.0],
+                    location: [0.5, 0.5],
                     size: [0.5, 0.5],
                     color: LOADING_BUTTON_COLOR.base_color,
                 },
@@ -331,7 +332,20 @@ fn main() -> Result<(), String> {
             )],
         )[0];
 
-        load_fn(&mut world, load_button_entity);
+        {
+            let args: Vec<String> = std::env::args().collect();
+            if let Some(path) = args.get(1) {
+                function::load(&mut world, load_button_entity, path.clone());
+            } else {
+                let file_path = std::fs::read_to_string(&*PATH_OF_MUSIC_PATH);
+                match file_path {
+                    Err(e) => log::error!("error reading setting: {}", e),
+                    Ok(path) => {
+                        function::load(&mut world, load_button_entity, path);
+                    }
+                }
+            }
+        }
 
         let slider_entities = world.insert(
             (),
@@ -345,7 +359,7 @@ fn main() -> Result<(), String> {
                         state_colors: SLIDER_COLOR,
                     },
                     Transform {
-                        location: [-1.0, -0.5],
+                        location: [-1.0, 0.0],
                         size: [2.0, 0.5],
                         color: NORMAL_BUTTON_COLOR.base_color,
                     },
@@ -359,7 +373,7 @@ fn main() -> Result<(), String> {
                         state_colors: SLIDER_COLOR,
                     },
                     Transform {
-                        location: [-1.0, 0.0],
+                        location: [-1.0, -0.5],
                         size: [2.0, 0.5],
                         color: NORMAL_BUTTON_COLOR.base_color,
                     },
@@ -373,7 +387,7 @@ fn main() -> Result<(), String> {
                         state_colors: SLIDER_COLOR,
                     },
                     Transform {
-                        location: [-1.0, 0.5],
+                        location: [-1.0, -1.0],
                         size: [2.0, 0.5],
                         color: NORMAL_BUTTON_COLOR.base_color,
                     },
@@ -580,6 +594,7 @@ fn main() -> Result<(), String> {
                     button.update_with_input(hover, input.mouse_pressing);
                 }
             });
+
         let update_slider = SystemBuilder::new("update_slider")
             .read_resource::<Input>()
             .with_query(<(Write<Slider>, Read<StateButton>, Read<Transform>)>::query())
@@ -766,7 +781,7 @@ fn main() -> Result<(), String> {
             } if window_id == window.id() => {
                 let inner_size = window.inner_size();
                 let x = (position.x as f32 / inner_size.width as f32) * 2.0 - 1.0;
-                let y = (position.y as f32 / inner_size.height as f32) * 2.0 - 1.0;
+                let y = 1.0 - (position.y as f32 / inner_size.height as f32) * 2.0;
                 use legion::{query::Write, resource::ResourceSet};
                 Write::<Input>::fetch(&world.resources).mouse_location = Some((x, y));
             }
@@ -886,7 +901,9 @@ fn main() -> Result<(), String> {
                         transforms.push(progress);
                     }
                 }
-                renderer.render(&transforms, &render_pipeline);
+                if let Err(e) = renderer.render(&transforms, &render_pipeline) {
+                    log::error!("render error: {}", e);
+                }
             }
             Event::RedrawEventsCleared => {
                 *control_flow = ControlFlow::WaitUntil(next_time);
@@ -909,9 +926,9 @@ fn main() -> Result<(), String> {
 fn is_in_box(transform: &Transform, position: &(f32, f32)) -> bool {
     let left = transform.location[0];
     let right = transform.location[0] + transform.size[0];
-    let top = transform.location[1];
-    let bottom = transform.location[1] + transform.size[1];
-    position.0 > left && position.0 < right && position.1 > top && position.1 < bottom
+    let bottom = transform.location[1];
+    let top = transform.location[1] + transform.size[1];
+    position.0 > left && position.0 < right && position.1 > bottom && position.1 < top
 }
 
 fn relative_to_box(transform: &Transform, position: &(f32, f32)) -> (f32, f32) {
@@ -922,4 +939,46 @@ fn relative_to_box(transform: &Transform, position: &(f32, f32)) -> (f32, f32) {
 
 fn smooth_to(current_value: f32, target_value: f32, change_speed: f32) -> f32 {
     current_value + (target_value - current_value) * change_speed
+}
+
+mod function {
+    use super::LOADING_BUTTON_COLOR;
+    use legion::{entity::Entity, query::Read, resource::ResourceSet, world::World};
+    use std::{
+        fmt::Debug,
+        marker::{Send, Sync},
+    };
+
+    use super::entity::{
+        audio::AudioBufferLoader, button::ButtonColors, slider::Slider, ButtonFn, ButtonFunctions,
+        Spawner, TargetValue,
+    };
+    pub fn load<P: AsRef<std::path::Path> + Debug + Sync + Send + 'static>(
+        world: &mut World,
+        self_entity: Entity,
+        file_path: P,
+    ) {
+        log::info!("loading {:?}", file_path);
+        world.insert(
+            (),
+            vec![(AudioBufferLoader::load(file_path), Spawner(self_entity))],
+        );
+
+        let stop_load_fn = &Read::<ButtonFunctions>::fetch(&world.resources).stop_load_fn;
+        if let Some(mut self_fn) = world.get_component_mut::<ButtonFn>(self_entity) {
+            *self_fn = std::sync::Arc::clone(stop_load_fn);
+        }
+
+        if let Some(mut colors) = world.get_component_mut::<ButtonColors>(self_entity) {
+            *colors = LOADING_BUTTON_COLOR;
+        }
+
+        if let Some(mut slider) = world.get_component_mut::<Slider>(self_entity) {
+            slider.set_value(0.0);
+        }
+
+        if let Some(mut target_value) = world.get_component_mut::<TargetValue>(self_entity) {
+            target_value.0 = 0.0;
+        }
+    }
 }
