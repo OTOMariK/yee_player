@@ -46,6 +46,7 @@ impl Default for Transform {
     }
 }
 use std::path::PathBuf;
+use wgpu::util::DeviceExt;
 
 pub struct PiplineSetting {
     pub vertex_shader_path: PathBuf,
@@ -70,33 +71,34 @@ impl Renderer {
         window: &W,
         size: winit::dpi::PhysicalSize<u32>,
     ) -> Result<Self, String> {
-        let surface = wgpu::Surface::create(window);
+        let instance = wgpu::Instance::new(wgpu::BackendBit::PRIMARY);
+        let surface = unsafe { instance.create_surface(window) };
 
-        let adapter = futures::executor::block_on(wgpu::Adapter::request(
-            &wgpu::RequestAdapterOptions {
+        let adapter =
+            futures::executor::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::Default,
                 compatible_surface: None,
-            },
-            wgpu::BackendBit::PRIMARY,
-        ))
-        .ok_or("no adapter found!")?;
+            }))
+            .ok_or("no adapter found!")?;
 
-        let (device, queue) =
-            futures::executor::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                extensions: wgpu::Extensions {
-                    anisotropic_filtering: false,
-                },
+        let (device, queue) = futures::executor::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                features: wgpu::Features::empty(),
                 limits: wgpu::Limits::default(),
-            }));
+                shader_validation: true,
+            },
+            None,
+        ))
+        .map_err(|e| format!("can not request device: {}", e))?;
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
-            bindings: &[],
+            entries: &[],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &bind_group_layout,
-            bindings: &[],
+            entries: &[],
         });
 
         let swap_chain_desc = wgpu::SwapChainDescriptor {
@@ -108,9 +110,17 @@ impl Renderer {
         };
         let swap_chain = device.create_swap_chain(&surface, &swap_chain_desc);
         let (vertex_buffer, index_buffer) = {
-            let vb = device.create_buffer_with_data(VERTEX.as_bytes(), wgpu::BufferUsage::VERTEX);
+            let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vertex buffer"),
+                contents: VERTEX.as_bytes(),
+                usage: wgpu::BufferUsage::VERTEX,
+            });
 
-            let ib = device.create_buffer_with_data(INDECES.as_bytes(), wgpu::BufferUsage::INDEX);
+            let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("index buffer"),
+                contents: INDECES.as_bytes(),
+                usage: wgpu::BufferUsage::INDEX,
+            });
             (vb, ib)
         };
 
@@ -141,27 +151,29 @@ impl Renderer {
         setting: &PiplineSetting,
     ) -> Result<wgpu::RenderPipeline, String> {
         let (vs_module, fs_module) = {
-            let mut vs_file =
-                std::fs::File::open(&setting.vertex_shader_path).map_err(|e| e.to_string())?;
-            let vs = wgpu::read_spirv(&mut vs_file).map_err(|e| e.to_string())?;
-            let vs_module = self.device.create_shader_module(&vs);
+            let vs_file = std::fs::read(&setting.vertex_shader_path).map_err(|e| e.to_string())?;
+            let vs = wgpu::util::make_spirv(&vs_file);
+            let vs_module = self.device.create_shader_module(vs);
 
-            let mut fs_file =
-                std::fs::File::open(&setting.fragment_shader_path).map_err(|e| e.to_string())?;
-            let fs = wgpu::read_spirv(&mut fs_file).map_err(|e| e.to_string())?;
-            let fs_module = self.device.create_shader_module(&fs);
+            let fs_file =
+                std::fs::read(&setting.fragment_shader_path).map_err(|e| e.to_string())?;
+            let fs = wgpu::util::make_spirv(&fs_file);
+            let fs_module = self.device.create_shader_module(fs);
             (vs_module, fs_module)
         };
 
         let pipeline_layout = self
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
                 bind_group_layouts: &[&self.bind_group_layout],
+                push_constant_ranges: &[],
             });
         Ok(self
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                layout: &pipeline_layout,
+                label: None,
+                layout: Some(&pipeline_layout),
                 vertex_stage: wgpu::ProgrammableStageDescriptor {
                     module: &vs_module,
                     entry_point: "main",
@@ -173,6 +185,7 @@ impl Renderer {
                 rasterization_state: Some(wgpu::RasterizationStateDescriptor {
                     front_face: wgpu::FrontFace::Ccw,
                     cull_mode: wgpu::CullMode::None,
+                    clamp_depth: false,
                     depth_bias: 0,
                     depth_bias_slope_scale: 0.0,
                     depth_bias_clamp: 0.0,
@@ -242,36 +255,41 @@ impl Renderer {
     ) -> Result<(), String> {
         let frame = self
             .swap_chain
-            .get_next_texture()
-            .map_err(|e| format!("{:?}", e))?;
+            .get_current_frame()
+            .map_err(|e| format!("{:?}", e))?
+            .output;
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         let transform_buffer = self
             .device
-            .create_buffer_with_data(transforms.as_bytes(), wgpu::BufferUsage::VERTEX);
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("transforms buffer"),
+                contents: transforms.as_bytes(),
+                usage: wgpu::BufferUsage::VERTEX,
+            });
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
                     attachment: &frame.view,
                     resolve_target: None,
-                    load_op: wgpu::LoadOp::Clear,
-                    store_op: wgpu::StoreOp::Store,
-                    clear_color: wgpu::Color::BLACK,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: true,
+                    },
                 }],
                 depth_stencil_attachment: None,
             });
             render_pass.set_pipeline(render_pipeline);
             render_pass.set_bind_group(0, &self.bind_group, &[]);
-            render_pass.set_vertex_buffer(0, &self.vertex_buffer, 0, 0);
-            render_pass.set_vertex_buffer(1, &transform_buffer, 0, 0);
-            render_pass.set_index_buffer(&self.index_buffer, 0, 0);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_vertex_buffer(1, transform_buffer.slice(..));
+            render_pass.set_index_buffer(self.index_buffer.slice(..));
             render_pass.draw_indexed(0..INDECES.len() as u32, 0, 0..transforms.len() as u32);
         }
-
-        self.queue.submit(&[encoder.finish()]);
+        self.queue.submit(Some(encoder.finish()));
         Ok(())
     }
 }

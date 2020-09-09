@@ -8,6 +8,12 @@ simple music player written in Rust
 
 使用Rust编写的简易音乐播放器
 
+# Feature 功能
+
+* audio loading and playing 音频加载与播放
+* playing audio at any speed 任意速度播放音频
+* looping 循环播放
+
 # Usage 使用方法
 
 <p align="center"><img src="asset/Manual.png"/></p>
@@ -16,9 +22,9 @@ simple music player written in Rust
 
 `播放/暂停按钮` 和 `倒放按钮` 通过改变播放速度来实现其功能
 
-`load music button` will read [`asset/setting/music_path.txt`](asset/setting/music_path.txt) to locate the music file
+`load setting button` will read [`asset/setting/setting.ron`](asset/setting/setting.ron) to reload the setting
 
-`加载音乐按钮`会读取[`asset/setting/music_path.txt`](asset/setting/music_path.txt)文件中指定的路径来寻找要加载的音乐文件
+`加载设置按钮`会读取[`asset/setting/setting.ron`](asset/setting/setting.ron)以重新加载设置
 
 this program will load the whole audio data into memory, loading long audio file may crash
 
@@ -34,6 +40,8 @@ feilds of [`setting.ron`](asset/setting/setting.ron):
 
 [`setting.ron`](asset/setting/setting.ron)中的参数：
 
+    // path to your music file  音乐文件路径
+    music_path: String
     // width of the window  窗口的宽度
     window_width: f32
     // height of the window  窗口的高度

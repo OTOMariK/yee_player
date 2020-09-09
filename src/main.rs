@@ -1,18 +1,22 @@
 // #![windows_subsystem = "windows"]
 
-use std::{path::PathBuf, str::FromStr, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 pub mod entity;
 use entity::{
-    audio::{AudioBufferLoader, AudioController},
     button::{ButtonColors, ButtonResponse, ButtonState, StateButton},
     render::Transform,
+    resource::{
+        audio::{AudioController, AudioLoader, AudioLoaderRes},
+        ButtonFunctions, ControlledSliders, Input, MusicFileMetaData, PlayingSpeed, Setting,
+        SettingPath,
+    },
     slider::{Slider, SliderColors},
-    ButtonFn, ButtonFunctions, ControlledSliders, PlayingSpeed, Spawner, TargetValue,
+    ButtonFn, TargetValue,
 };
 
 pub mod buffer_player;
-use buffer_player::SamplesBuffer;
+use buffer_player::{AudioBufferLoader, SamplesBuffer};
 
 pub mod renderer;
 use renderer::{PiplineSetting, Renderer};
@@ -20,38 +24,13 @@ use renderer::{PiplineSetting, Renderer};
 mod icon;
 use icon::create_icon_data;
 
+use legion::{
+    query::{IntoQuery, Read, Write},
+    world::EntityStore,
+    Entity, Resources, Schedule, SystemBuilder, World,
+};
 // MARK: consts
 const FRAME_GAP: std::time::Duration = std::time::Duration::from_nanos(0_016_666_667);
-
-#[macro_use]
-extern crate lazy_static;
-lazy_static! {
-    static ref FRAGMENT_SHADER_PATH: PathBuf =
-        execute_or_relative_path("./asset/shader/frag.glsl.spv").unwrap();
-    static ref VERTEX_SHADER_PATH: PathBuf =
-        execute_or_relative_path("./asset/shader/vert.glsl.spv").unwrap();
-    static ref SETTING_PATH: PathBuf =
-        execute_or_relative_path("./asset/setting/setting.ron").unwrap();
-    static ref PATH_OF_MUSIC_PATH: PathBuf =
-        execute_or_relative_path("./asset/setting/music_path.txt").unwrap();
-}
-
-fn execute_or_relative_path(path: &str) -> Option<PathBuf> {
-    if let Some(relative_path) = PathBuf::from_str(path).ok() {
-        let exe_path = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join(relative_path.clone());
-        if exe_path.exists() {
-            Some(exe_path)
-        } else {
-            Some(relative_path)
-        }
-    } else {
-        None
-    }
-}
 
 pub const NORMAL_BUTTON_COLOR: ButtonColors = ButtonColors {
     base_color: [0.0, 0.27, 0.5],
@@ -74,55 +53,17 @@ pub const LOADING_BUTTON_COLOR: ButtonColors = ButtonColors {
     press_color: [0.0, 0.03, 0.05],
 };
 
-#[derive(Clone, Default, Debug)]
-struct Input {
-    mouse_location: Option<(f32, f32)>,
-    mouse_pressing: bool,
-    ctrl_pressing: bool,
-    hover_file: bool,
-    drop_file: Option<PathBuf>,
-    exit: bool,
-}
-
-use serde::Deserialize;
-#[derive(Debug, Clone, Deserialize)]
-struct Setting {
-    window_width: f32,
-    window_height: f32,
-    max_speed: f32,
-    min_speed: f32,
-}
-
-impl Default for Setting {
-    fn default() -> Self {
-        Self {
-            window_width: 512.0,
-            window_height: 512.0,
-            max_speed: 2.0,
-            min_speed: -2.0,
-        }
-    }
-}
-
 // MARK: main
 fn main() -> Result<(), String> {
     env_logger::builder()
         .filter_level(log::LevelFilter::Error)
-        .filter_module("yee_player", log::LevelFilter::Info)
+        .filter_module("yee_player", log::LevelFilter::Trace)
         .init();
-
-    let setting: Setting = {
-        let string = std::fs::read_to_string(&*SETTING_PATH).map_err(|e| {
-            let err = format!("error opening {:?}: {:?}", &*SETTING_PATH, e);
-            log::error!("{}", err);
-            err
-        })?;
-        ron::de::from_str(string.as_str()).map_err(|e| {
-            let err = format!("error parsing {:?}: {:?}", &*SETTING_PATH, e);
-            log::error!("{}", err);
-            err
-        })?
-    };
+    let fs_path: PathBuf = function::execute_or_relative_path("./asset/shader/frag.glsl.spv")?;
+    let vs_path: PathBuf = function::execute_or_relative_path("./asset/shader/vert.glsl.spv")?;
+    let setting_path =
+        SettingPath(function::execute_or_relative_path("./asset/setting/setting.ron").unwrap());
+    let setting = Setting::load(&setting_path.0).unwrap_or_default();
 
     let event_loop = winit::event_loop::EventLoop::new();
 
@@ -154,266 +95,299 @@ fn main() -> Result<(), String> {
         (window, size)
     };
 
-    let mut renderer = Renderer::init(&window, size)?;
+    let renderer = Renderer::init(&window, size)?;
     let render_pipeline = renderer.create_render_pipline(&PiplineSetting {
-        vertex_shader_path: VERTEX_SHADER_PATH.clone(),
-        fragment_shader_path: FRAGMENT_SHADER_PATH.clone(),
+        vertex_shader_path: vs_path,
+        fragment_shader_path: fs_path,
     })?;
 
     let audio_device = Arc::new(buffer_player::create_on_other_thread(|| -> _ {
         rodio::default_output_device().ok_or("can not get default audio output device!".to_string())
     })?);
 
-    let (_universe, mut world, mut schedule) = {
-        use legion::{
-            entity::Entity,
-            query::{IntoQuery, Read, Write},
-            resource::{ResourceSet, Resources},
-            schedule::Schedule,
-            system::SystemBuilder,
-            world::{Universe, World},
-        };
-        let universe = Universe::new();
-        let mut world = universe.create_world();
+    let (mut world, mut resources, mut schedule) = {
+        let mut world = World::default();
 
+        let play_fn: ButtonFn = Arc::new(
+            |_world: &mut World, res: &mut Resources, _self_entity: Entity| {
+                let controller = res.get::<AudioController<i16>>().unwrap();
+                let speed = controller.get_speed();
+                if speed == 0.0 {
+                    let value = res.get::<PlayingSpeed>().unwrap().0;
+                    controller.set_speed(value);
+                } else {
+                    res.get_mut::<PlayingSpeed>().unwrap().0 = speed;
+                    controller.set_speed(0.0);
+                }
+            },
+        );
+
+        let loop_fn: ButtonFn = Arc::new(
+            |world: &mut World, res: &mut Resources, self_entity: Entity| {
+                let controller = res.get::<AudioController<i16>>().unwrap();
+                controller.set_loop_mode(true);
+
+                let unloop_fn: &ButtonFn = &res.get::<ButtonFunctions>().unwrap().unloop_fn;
+                if let Some(mut entry) = world.entry(self_entity) {
+                    if let Ok(self_fn) = entry.get_component_mut::<ButtonFn>() {
+                        *self_fn = Arc::clone(unloop_fn);
+                    }
+                    if let Ok(colors) = entry.get_component_mut::<ButtonColors>() {
+                        *colors = LOOP_BUTTON_COLOR;
+                    }
+                }
+            },
+        );
+
+        let unloop_fn: ButtonFn = Arc::new(
+            |world: &mut World, res: &mut Resources, self_entity: Entity| {
+                let controller = res.get::<AudioController<i16>>().unwrap();
+                controller.set_loop_mode(false);
+
+                let loop_fn: &ButtonFn = &res.get::<ButtonFunctions>().unwrap().loop_fn;
+                if let Some(mut entry) = world.entry(self_entity) {
+                    if let Ok(self_fn) = entry.get_component_mut::<ButtonFn>() {
+                        *self_fn = Arc::clone(loop_fn);
+                    }
+                    if let Ok(colors) = entry.get_component_mut::<ButtonColors>() {
+                        *colors = NORMAL_BUTTON_COLOR;
+                    }
+                }
+            },
+        );
+
+        let load_fn: ButtonFn = Arc::new(
+            |world: &mut World, res: &mut Resources, self_entity: Entity| {
+                let setting_path = res.get::<SettingPath>().unwrap();
+                let mut setting = res.get_mut::<Setting>().unwrap();
+                let new_setting = Setting::load(&setting_path.0).unwrap_or_default();
+                if new_setting.window_width != setting.window_width
+                    || new_setting.window_height != setting.window_height
+                {
+                    let window = res.get_mut::<winit::window::Window>().unwrap();
+                    window.set_inner_size(winit::dpi::LogicalSize {
+                        width: new_setting.window_width,
+                        height: new_setting.window_height,
+                    });
+                    setting.window_width = new_setting.window_width;
+                    setting.window_height = new_setting.window_height;
+                }
+
+                if new_setting.max_speed != setting.max_speed
+                    || new_setting.min_speed != setting.min_speed
+                {
+                    let speed_slider_entity = res.get::<ControlledSliders>().unwrap().speed_slider;
+                    if let Some(mut entry) = world.entry(speed_slider_entity) {
+                        let speed_slider = entry.get_component_mut::<Slider>().unwrap();
+                        speed_slider.set_range(new_setting.min_speed..new_setting.max_speed);
+                    }
+                    setting.max_speed = new_setting.max_speed;
+                    setting.min_speed = new_setting.min_speed;
+                }
+
+                let new_music_path = function::execute_or_relative_path(&new_setting.music_path);
+                match new_music_path {
+                    Err(e) => log::error!("error getting music path: {}", e),
+                    Ok(path) => match std::fs::metadata(&path) {
+                        Err(e) => log::error!("error getting music metadata: {}", e),
+                        Ok(meta) => {
+                            let mut should_load = true;
+                            if let Some(old_meta) = res.get::<MusicFileMetaData>().unwrap().as_ref()
+                            {
+                                if let (Ok(old_date), Ok(date)) =
+                                    (old_meta.accessed(), meta.accessed())
+                                {
+                                    if old_date == date
+                                        && setting.music_path == new_setting.music_path
+                                    {
+                                        should_load = false;
+                                    }
+                                }
+                            }
+                            if should_load {
+                                function::load_music(
+                                    world,
+                                    res,
+                                    self_entity,
+                                    &new_setting.music_path,
+                                );
+                            }
+                        }
+                    },
+                }
+            },
+        );
+
+        let stop_load_fn: ButtonFn = Arc::new(
+            |world: &mut World, res: &mut Resources, self_entity: Entity| {
+                if let Some(loader) = res.get::<AudioLoaderRes>().unwrap().as_ref() {
+                    loader.loader.stop_loading();
+                }
+
+                let load_fn: &ButtonFn = &res.get::<ButtonFunctions>().unwrap().load_fn;
+                if let Some(mut entry) = world.entry(self_entity) {
+                    if let Ok(self_fn) = entry.get_component_mut::<ButtonFn>() {
+                        *self_fn = Arc::clone(load_fn);
+                    }
+                    if let Ok(colors) = entry.get_component_mut::<ButtonColors>() {
+                        *colors = NORMAL_BUTTON_COLOR;
+                    }
+                }
+            },
+        ) as ButtonFn;
+
+        // MARK: entity
+        world.extend(vec![
+            (
+                StateButton::new(),
+                NORMAL_BUTTON_COLOR,
+                Transform {
+                    location: [-1.0, 0.5],
+                    size: [0.5, 0.5],
+                    color: NORMAL_BUTTON_COLOR.base_color,
+                },
+                Arc::clone(&play_fn),
+            ),
+            (
+                StateButton::new(),
+                NORMAL_BUTTON_COLOR,
+                Transform {
+                    location: [-0.5, 0.5],
+                    size: [0.5, 0.5],
+                    color: NORMAL_BUTTON_COLOR.base_color,
+                },
+                Arc::new(
+                    |_world: &mut World, res: &mut Resources, _self_entity: Entity| {
+                        let controller = res.get::<AudioController<i16>>().unwrap();
+                        controller.set_speed(-controller.get_speed());
+                    },
+                ),
+            ),
+            (
+                StateButton::new(),
+                NORMAL_BUTTON_COLOR,
+                Transform {
+                    location: [0.0, 0.5],
+                    size: [0.5, 0.5],
+                    color: NORMAL_BUTTON_COLOR.base_color,
+                },
+                Arc::clone(&loop_fn),
+            ),
+        ]);
+        let load_button_entity = world.push((
+            StateButton::new(),
+            Slider::new(0.0, 0.0..1.0),
+            TargetValue(0.0),
+            LOADING_BUTTON_COLOR,
+            SliderColors {
+                current_color: NORMAL_BUTTON_COLOR.base_color,
+                state_colors: NORMAL_BUTTON_COLOR,
+            },
+            Transform {
+                location: [0.5, 0.5],
+                size: [0.5, 0.5],
+                color: LOADING_BUTTON_COLOR.base_color,
+            },
+            Arc::clone(&stop_load_fn),
+        ));
+
+        let slider_entities = world.extend(vec![
+            (
+                StateButton::new(),
+                Slider::new(0.0, 0.0..1.0),
+                NORMAL_BUTTON_COLOR,
+                SliderColors {
+                    current_color: SLIDER_COLOR.base_color,
+                    state_colors: SLIDER_COLOR,
+                },
+                Transform {
+                    location: [-1.0, 0.0],
+                    size: [2.0, 0.5],
+                    color: NORMAL_BUTTON_COLOR.base_color,
+                },
+            ),
+            (
+                StateButton::new(),
+                Slider::new(1.0, setting.min_speed..setting.max_speed),
+                NORMAL_BUTTON_COLOR,
+                SliderColors {
+                    current_color: SLIDER_COLOR.base_color,
+                    state_colors: SLIDER_COLOR,
+                },
+                Transform {
+                    location: [-1.0, -0.5],
+                    size: [2.0, 0.5],
+                    color: NORMAL_BUTTON_COLOR.base_color,
+                },
+            ),
+            (
+                StateButton::new(),
+                Slider::new(0.25, 0.0..1.0),
+                NORMAL_BUTTON_COLOR,
+                SliderColors {
+                    current_color: SLIDER_COLOR.base_color,
+                    state_colors: SLIDER_COLOR,
+                },
+                Transform {
+                    location: [-1.0, -1.0],
+                    size: [2.0, 0.5],
+                    color: NORMAL_BUTTON_COLOR.base_color,
+                },
+            ),
+        ]);
+
+        // Resources
         let mut resources = Resources::default();
         resources.insert(Input::default());
         let empty_buffer = Arc::new(SamplesBuffer::new(1, 48000, Vec::<i16>::new()));
         resources.insert(Arc::clone(&empty_buffer));
-        let play_fn = Arc::new(|world: &mut World, _self_entity: Entity| {
-            let query = Read::<AudioController<i16>>::query();
-            let mut controller_entities = Vec::new();
-            for (e, controller) in query.iter_entities_immutable(&world) {
-                let speed = controller.get_speed();
-                if speed == 0.0 {
-                    let value = {
-                        if let Some(v) = world.get_component::<PlayingSpeed>(e) {
-                            v.0
-                        } else {
-                            1.0
-                        }
-                    };
-                    controller.set_speed(value);
-                } else {
-                    controller.set_speed(0.0);
-                    controller_entities.push((e, PlayingSpeed(speed)));
-                }
-            }
-            for (e, v) in controller_entities {
-                world.add_component(e, v);
-            }
-        }) as ButtonFn;
-
-        let loop_fn = Arc::new(|world: &mut World, self_entity: Entity| {
-            let query = Read::<AudioController<i16>>::query();
-            for controller in query.iter_immutable(&world) {
-                controller.set_loop_mode(true);
-            }
-
-            let unloop_fn = &Read::<ButtonFunctions>::fetch(&world.resources).unloop_fn;
-            if let Some(mut self_fn) = world.get_component_mut::<ButtonFn>(self_entity) {
-                *self_fn = Arc::clone(unloop_fn);
-            }
-
-            if let Some(mut colors) = world.get_component_mut::<ButtonColors>(self_entity) {
-                *colors = LOOP_BUTTON_COLOR;
-            }
-        }) as ButtonFn;
-
-        let unloop_fn = Arc::new(|world: &mut World, self_entity: Entity| {
-            let query = Read::<AudioController<i16>>::query();
-            for controller in query.iter_immutable(&world) {
-                controller.set_loop_mode(false);
-            }
-
-            let loop_fn = &Read::<ButtonFunctions>::fetch(&world.resources).loop_fn;
-            if let Some(mut self_fn) = world.get_component_mut::<ButtonFn>(self_entity) {
-                *self_fn = Arc::clone(loop_fn);
-            }
-
-            if let Some(mut colors) = world.get_component_mut::<ButtonColors>(self_entity) {
-                *colors = NORMAL_BUTTON_COLOR;
-            }
-        }) as ButtonFn;
-
-        let load_fn = Arc::new(|world: &mut World, self_entity: Entity| {
-            let file_path = std::fs::read_to_string(&*PATH_OF_MUSIC_PATH);
-            match file_path {
-                Err(e) => log::error!("error reading setting: {}", e),
-                Ok(path) => {
-                    function::load(world, self_entity, path);
-                }
-            }
-        }) as ButtonFn;
-
-        let stop_load_fn = Arc::new(|world: &mut World, self_entity: Entity| {
-            let query = Read::<AudioBufferLoader<i16>>::query();
-            for loader in query.iter_immutable(&world) {
-                loader.stop_loading();
-            }
-
-            let load_fn = &Read::<ButtonFunctions>::fetch(&world.resources).load_fn;
-            if let Some(mut self_fn) = world.get_component_mut::<ButtonFn>(self_entity) {
-                *self_fn = Arc::clone(load_fn);
-            }
-
-            if let Some(mut colors) = world.get_component_mut::<ButtonColors>(self_entity) {
-                *colors = NORMAL_BUTTON_COLOR;
-            }
-        }) as ButtonFn;
-
+        resources.insert(window);
+        resources.insert(renderer);
         resources.insert(ButtonFunctions {
-            play_fn: Arc::clone(&play_fn),
-            loop_fn: Arc::clone(&loop_fn),
+            play_fn,
+            loop_fn,
             unloop_fn,
-            load_fn: Arc::clone(&load_fn),
-            stop_load_fn: Arc::clone(&stop_load_fn),
+            load_fn,
+            stop_load_fn,
         });
-        world.resources = resources;
-
-        // MARK: entity
-        world.insert(
-            (),
-            vec![
-                (
-                    StateButton::new(),
-                    NORMAL_BUTTON_COLOR,
-                    Transform {
-                        location: [-1.0, 0.5],
-                        size: [0.5, 0.5],
-                        color: NORMAL_BUTTON_COLOR.base_color,
-                    },
-                    play_fn,
-                ),
-                (
-                    StateButton::new(),
-                    NORMAL_BUTTON_COLOR,
-                    Transform {
-                        location: [-0.5, 0.5],
-                        size: [0.5, 0.5],
-                        color: NORMAL_BUTTON_COLOR.base_color,
-                    },
-                    Arc::new(|world: &mut World, _self_entity: Entity| {
-                        let query = Read::<AudioController<i16>>::query();
-                        for controller in query.iter_immutable(&world) {
-                            controller.set_speed(-controller.get_speed());
-                        }
-                    }),
-                ),
-                (
-                    StateButton::new(),
-                    NORMAL_BUTTON_COLOR,
-                    Transform {
-                        location: [0.0, 0.5],
-                        size: [0.5, 0.5],
-                        color: NORMAL_BUTTON_COLOR.base_color,
-                    },
-                    loop_fn,
-                ),
-            ],
-        );
-        let load_button_entity = world.insert(
-            (),
-            vec![(
-                StateButton::new(),
-                Slider::new(0.0, 0.0..1.0),
-                TargetValue(0.0),
-                LOADING_BUTTON_COLOR,
-                SliderColors {
-                    current_color: NORMAL_BUTTON_COLOR.base_color,
-                    state_colors: NORMAL_BUTTON_COLOR,
-                },
-                Transform {
-                    location: [0.5, 0.5],
-                    size: [0.5, 0.5],
-                    color: LOADING_BUTTON_COLOR.base_color,
-                },
-                stop_load_fn,
-            )],
-        )[0];
+        // setting
+        resources.insert(setting_path);
+        resources.insert(setting);
+        resources.insert::<MusicFileMetaData>(None);
+        // controller
+        resources.insert(AudioController::new_with_buffer(audio_device, empty_buffer));
+        let controlled_sliders = ControlledSliders {
+            time_slider: slider_entities[0],
+            speed_slider: slider_entities[1],
+            volume_slider: slider_entities[2],
+        };
+        resources.insert(controlled_sliders);
+        resources.insert(PlayingSpeed(1.0));
+        // buffer loader
+        resources.insert::<AudioLoaderRes>(None);
 
         {
+            // command line support
             let args: Vec<String> = std::env::args().collect();
             if let Some(path) = args.get(1) {
-                function::load(&mut world, load_button_entity, path.clone());
+                function::load_music(&mut world, &resources, load_button_entity, path);
             } else {
-                let file_path = std::fs::read_to_string(&*PATH_OF_MUSIC_PATH);
-                match file_path {
-                    Err(e) => log::error!("error reading setting: {}", e),
-                    Ok(path) => {
-                        function::load(&mut world, load_button_entity, path);
-                    }
-                }
+                let setting = resources.get::<Setting>().unwrap();
+                function::load_music(
+                    &mut world,
+                    &resources,
+                    load_button_entity,
+                    &setting.music_path,
+                );
             }
         }
 
-        let slider_entities = world.insert(
-            (),
-            vec![
-                (
-                    StateButton::new(),
-                    Slider::new(0.0, 0.0..1.0),
-                    NORMAL_BUTTON_COLOR,
-                    SliderColors {
-                        current_color: SLIDER_COLOR.base_color,
-                        state_colors: SLIDER_COLOR,
-                    },
-                    Transform {
-                        location: [-1.0, 0.0],
-                        size: [2.0, 0.5],
-                        color: NORMAL_BUTTON_COLOR.base_color,
-                    },
-                ),
-                (
-                    StateButton::new(),
-                    Slider::new(1.0, setting.min_speed..setting.max_speed),
-                    NORMAL_BUTTON_COLOR,
-                    SliderColors {
-                        current_color: SLIDER_COLOR.base_color,
-                        state_colors: SLIDER_COLOR,
-                    },
-                    Transform {
-                        location: [-1.0, -0.5],
-                        size: [2.0, 0.5],
-                        color: NORMAL_BUTTON_COLOR.base_color,
-                    },
-                ),
-                (
-                    StateButton::new(),
-                    Slider::new(0.25, 0.0..1.0),
-                    NORMAL_BUTTON_COLOR,
-                    SliderColors {
-                        current_color: SLIDER_COLOR.base_color,
-                        state_colors: SLIDER_COLOR,
-                    },
-                    Transform {
-                        location: [-1.0, -1.0],
-                        size: [2.0, 0.5],
-                        color: NORMAL_BUTTON_COLOR.base_color,
-                    },
-                ),
-            ],
-        );
-        {
-            let controlled_sliders = ControlledSliders {
-                time_slider: slider_entities[0],
-                speed_slider: slider_entities[1],
-                volume_slider: slider_entities[2],
-            };
-            world.insert(
-                (),
-                vec![(
-                    AudioController::new_with_buffer(audio_device, empty_buffer),
-                    controlled_sliders,
-                )],
-            );
-        }
         // MARK: systems
         let update_button_and_slider_color = SystemBuilder::new("update_button_and_slider_color")
             .with_query(<(Write<SliderColors>, Read<StateButton>)>::query())
             .with_query(<(Read<StateButton>, Read<ButtonColors>, Write<Transform>)>::query())
             .build(|_, world, _, (slider_query, button_query)| {
-                for (button, colors, mut transform) in button_query.iter(world) {
+                button_query.for_each_mut(world, |(button, colors, mut transform)| {
                     match button.get_state() {
                         ButtonState::Unhover => {
                             let speed = 0.17;
@@ -437,68 +411,67 @@ fn main() -> Result<(), String> {
                             transform.color = [r, g, b];
                         }
                     }
-                }
-                for (mut color, button) in slider_query.iter(world) {
-                    match button.get_state() {
-                        ButtonState::Unhover => {
-                            let speed = 0.17;
-                            let r = smooth_to(
-                                color.current_color[0],
-                                color.state_colors.base_color[0],
-                                speed,
-                            );
-                            let g = smooth_to(
-                                color.current_color[1],
-                                color.state_colors.base_color[1],
-                                speed,
-                            );
-                            let b = smooth_to(
-                                color.current_color[2],
-                                color.state_colors.base_color[2],
-                                speed,
-                            );
-                            color.current_color = [r, g, b];
-                        }
-                        ButtonState::Hover => {
-                            let speed = 0.2;
-                            let r = smooth_to(
-                                color.current_color[0],
-                                color.state_colors.hover_color[0],
-                                speed,
-                            );
-                            let g = smooth_to(
-                                color.current_color[1],
-                                color.state_colors.hover_color[1],
-                                speed,
-                            );
-                            let b = smooth_to(
-                                color.current_color[2],
-                                color.state_colors.hover_color[2],
-                                speed,
-                            );
-                            color.current_color = [r, g, b];
-                        }
-                        ButtonState::Press => {
-                            let speed = 0.6;
-                            let r = smooth_to(
-                                color.current_color[0],
-                                color.state_colors.press_color[0],
-                                speed,
-                            );
-                            let g = smooth_to(
-                                color.current_color[1],
-                                color.state_colors.press_color[1],
-                                speed,
-                            );
-                            let b = smooth_to(
-                                color.current_color[2],
-                                color.state_colors.press_color[2],
-                                speed,
-                            );
-                            color.current_color = [r, g, b];
-                        }
+                });
+
+                slider_query.for_each_mut(world, |(mut color, button)| match button.get_state() {
+                    ButtonState::Unhover => {
+                        let speed = 0.17;
+                        let r = smooth_to(
+                            color.current_color[0],
+                            color.state_colors.base_color[0],
+                            speed,
+                        );
+                        let g = smooth_to(
+                            color.current_color[1],
+                            color.state_colors.base_color[1],
+                            speed,
+                        );
+                        let b = smooth_to(
+                            color.current_color[2],
+                            color.state_colors.base_color[2],
+                            speed,
+                        );
+                        color.current_color = [r, g, b];
                     }
-                }
+                    ButtonState::Hover => {
+                        let speed = 0.2;
+                        let r = smooth_to(
+                            color.current_color[0],
+                            color.state_colors.hover_color[0],
+                            speed,
+                        );
+                        let g = smooth_to(
+                            color.current_color[1],
+                            color.state_colors.hover_color[1],
+                            speed,
+                        );
+                        let b = smooth_to(
+                            color.current_color[2],
+                            color.state_colors.hover_color[2],
+                            speed,
+                        );
+                        color.current_color = [r, g, b];
+                    }
+                    ButtonState::Press => {
+                        let speed = 0.6;
+                        let r = smooth_to(
+                            color.current_color[0],
+                            color.state_colors.press_color[0],
+                            speed,
+                        );
+                        let g = smooth_to(
+                            color.current_color[1],
+                            color.state_colors.press_color[1],
+                            speed,
+                        );
+                        let b = smooth_to(
+                            color.current_color[2],
+                            color.state_colors.press_color[2],
+                            speed,
+                        );
+                        color.current_color = [r, g, b];
+                    }
+                });
             });
 
         let check_loader = SystemBuilder::new("check_loader")
@@ -508,22 +481,26 @@ fn main() -> Result<(), String> {
             .write_component::<Slider>()
             .read_resource::<ButtonFunctions>()
             .write_resource::<Arc<SamplesBuffer<i16>>>()
-            .with_query(<(Write<AudioBufferLoader<i16>>, Read<Spawner>)>::query())
-            .with_query(<(Write<AudioController<i16>>, Read<ControlledSliders>)>::query())
+            .write_resource::<AudioController<i16>>()
+            .read_resource::<ControlledSliders>()
+            .write_resource::<Setting>()
+            .write_resource::<MusicFileMetaData>()
+            .write_resource::<AudioLoaderRes>()
             .build(
-                |commands, mut world, (funcs, audio_buffer), (query0, query1)| {
+                |_,
+                 world,
+                 (funcs, audio_buffer, controller, sliders, setting, meta_data, loader),
+                 _| {
+                    // query.for_each_mut(&mut query_world, |(entity, buffer_loader, caller)| {
                     let mut audio_buffer_loaded = false;
-                    for (entity, (mut buffer_loader, caller)) in query0.iter_entities(&mut world) {
-                        if let Some(value) = buffer_loader.try_get_value() {
-                            match value {
+                    let mut drop_loader = false;
+                    if let Some(loader) = loader.as_mut() {
+                        if let Some(value) = loader.loader.try_get_value() {
+                            drop_loader = true;
+                            let value = match value {
                                 Err(e) => {
                                     log::error!("error loading audio: {}", e);
-
-                                    if let Some(mut target_value) =
-                                        world.get_component_mut::<TargetValue>(caller.0)
-                                    {
-                                        target_value.0 = 0.0;
-                                    }
+                                    0.0
                                 }
                                 Ok(value) => {
                                     log::info!(
@@ -532,49 +509,48 @@ fn main() -> Result<(), String> {
                                     );
                                     **audio_buffer = Arc::new(value);
                                     audio_buffer_loaded = true;
-
-                                    if let Some(mut target_value) =
-                                        world.get_component_mut::<TargetValue>(caller.0)
-                                    {
-                                        target_value.0 = 1.0;
-                                    }
+                                    setting.music_path = loader.path.clone();
+                                    **meta_data = std::fs::metadata(&setting.music_path).ok();
+                                    1.0
+                                }
+                            };
+                            // load_button visual stuff
+                            if let Ok(mut entry) = world.entry_mut(loader.load_button_entity) {
+                                if let Ok(target_value) = entry.get_component_mut::<TargetValue>() {
+                                    target_value.0 = value;
+                                }
+                                if let Ok(colors) = entry.get_component_mut::<ButtonColors>() {
+                                    *colors = NORMAL_BUTTON_COLOR;
+                                }
+                                if let Ok(caller_fn) = entry.get_component_mut::<ButtonFn>() {
+                                    *caller_fn = Arc::clone(&funcs.load_fn);
                                 }
                             }
-                            if let Some(mut caller_fn) =
-                                world.get_component_mut::<ButtonFn>(caller.0)
-                            {
-                                *caller_fn = Arc::clone(&funcs.load_fn);
+                        } else if let Ok(mut entry) = world.entry_mut(loader.load_button_entity) {
+                            if let Ok(target_value) = entry.get_component_mut::<TargetValue>() {
+                                target_value.0 = loader.loader.get_progress();
                             }
-
-                            if let Some(mut colors) =
-                                world.get_component_mut::<ButtonColors>(caller.0)
-                            {
-                                *colors = NORMAL_BUTTON_COLOR;
-                            }
-                            commands.delete(entity);
-                        } else if let Some(mut target_value) =
-                            world.get_component_mut::<TargetValue>(caller.0)
-                        {
-                            target_value.0 = buffer_loader.get_progress();
                         }
                     }
+                    if drop_loader {
+                        **loader = None;
+                    }
                     if audio_buffer_loaded {
-                        for (mut controller, sliders) in query1.iter(world) {
-                            if !Arc::ptr_eq(controller.get_target_buffer(), audio_buffer) {
-                                controller.set_target_buffer(Arc::clone(audio_buffer));
-                                let buffer_duartion =
-                                    controller.get_target_buffer().get_duration().as_secs_f32();
+                        if !Arc::ptr_eq(controller.get_target_buffer(), audio_buffer) {
+                            controller.set_target_buffer(Arc::clone(audio_buffer));
+                            let buffer_duartion =
+                                controller.get_target_buffer().get_duration().as_secs_f32();
 
-                                let mut time_slider = world
-                                    .get_component_mut::<Slider>(sliders.time_slider)
-                                    .unwrap();
-                                time_slider.set_range(0.0..buffer_duartion);
-
-                                if controller.get_speed() < 0.0 {
-                                    controller.change_time(buffer_duartion);
-                                } else {
-                                    controller.change_time(0.0);
+                            if let Ok(mut entry) = world.entry_mut(sliders.time_slider) {
+                                if let Ok(time_slider) = entry.get_component_mut::<Slider>() {
+                                    time_slider.set_range(0.0..buffer_duartion);
                                 }
+                            }
+
+                            if controller.get_speed() < 0.0 {
+                                controller.change_time(buffer_duartion);
+                            } else {
+                                controller.change_time(0.0);
                             }
                         }
                     }
@@ -585,22 +561,22 @@ fn main() -> Result<(), String> {
             .read_resource::<Input>()
             .with_query(<(Write<StateButton>, Read<Transform>)>::query())
             .build(|_commands, world, input, query| {
-                for (mut button, transform) in query.iter(world) {
+                query.for_each_mut(world, |(button, transform)| {
                     let hover = if let Some(location) = &input.mouse_location {
                         is_in_box(&transform, location)
                     } else {
                         false
                     };
                     button.update_with_input(hover, input.mouse_pressing);
-                }
+                });
             });
 
         let update_slider = SystemBuilder::new("update_slider")
             .read_resource::<Input>()
             .with_query(<(Write<Slider>, Read<StateButton>, Read<Transform>)>::query())
-            .build(|_commands, mut world, resource, query| {
+            .build(|_commands, world, resource, query| {
                 let mouse_location = &resource.mouse_location;
-                for (mut slider, button, transform) in query.iter(&mut world) {
+                query.for_each_mut(world, |(slider, button, transform)| {
                     match button.get_state() {
                         ButtonState::Unhover => {}
                         ButtonState::Hover => {}
@@ -621,12 +597,12 @@ fn main() -> Result<(), String> {
                             }
                         }
                     }
-                }
+                });
             });
         let update_slider_with_target_value = SystemBuilder::new("update_slider_with_target_value")
             .with_query(<(Write<Slider>, Read<TargetValue>)>::query())
-            .build(|_, mut world, _, query| {
-                for (mut slider, value) in query.iter(&mut world) {
+            .build(|_, world, _, query| {
+                for (slider, value) in query.iter_mut(world) {
                     let value = smooth_to(slider.get_value(), value.0, 0.4);
                     slider.set_value(value);
                 }
@@ -635,35 +611,33 @@ fn main() -> Result<(), String> {
         let update_controller = SystemBuilder::new("update_controller")
             .read_component::<Slider>()
             .write_component::<Slider>()
-            .with_query(<(Write<AudioController<i16>>, Read<ControlledSliders>)>::query())
-            .build(|_, mut world, _resource, query| {
-                for (controller, sliders) in query.iter(&mut world) {
-                    {
-                        let mut time_slider = world
-                            .get_component_mut::<Slider>(sliders.time_slider)
-                            .unwrap();
+            .write_resource::<AudioController<i16>>()
+            .read_resource::<ControlledSliders>()
+            .build(|_, world, (controller, sliders), _| {
+                if let Ok(mut entry) = world.entry_mut(sliders.time_slider) {
+                    if let Ok(time_slider) = entry.get_component_mut::<Slider>() {
                         if let Some(v) = time_slider.take_input_value() {
                             controller.change_time(v);
                         }
                         time_slider.set_value(controller.get_time());
                     }
-                    {
-                        let mut speed_slider = world
-                            .get_component_mut::<Slider>(sliders.speed_slider)
-                            .unwrap();
+                }
+
+                if let Ok(mut entry) = world.entry_mut(sliders.speed_slider) {
+                    if let Ok(speed_slider) = entry.get_component_mut::<Slider>() {
                         if let Some(v) = speed_slider.take_input_value() {
                             controller.set_speed(v);
                         }
                         speed_slider.set_value(controller.get_speed());
                     }
-                    {
-                        let mut volume_slider = world
-                            .get_component_mut::<Slider>(sliders.volume_slider)
-                            .unwrap();
+                }
+
+                if let Ok(mut entry) = world.entry_mut(sliders.volume_slider) {
+                    if let Ok(volume_slider) = entry.get_component_mut::<Slider>() {
                         if let Some(v) = volume_slider.take_input_value() {
                             controller.set_volume(v);
-                            volume_slider.set_value(controller.get_volume());
                         }
+                        volume_slider.set_value(controller.get_volume());
                     }
                 }
             });
@@ -676,45 +650,49 @@ fn main() -> Result<(), String> {
             .write_component::<TargetValue>()
             .write_resource::<Input>()
             .read_resource::<ButtonFunctions>()
-            .with_query(<(Read<AudioBufferLoader<i16>>, Read<Spawner>)>::query())
-            .build(move |command, world, (input, funcs), query| {
-                if let None = query.iter_immutable(world).next() {
-                    if input.hover_file {
-                        if let Some(mut button) =
-                            world.get_component_mut::<StateButton>(load_button_entity)
-                        {
-                            button.update_with_input(true, false);
+            .write_resource::<AudioLoaderRes>()
+            .build(move |_, world, (input, funcs, loader), _| {
+                // when there is no AudioBufferLoader exist, load the dropped file
+                if loader.is_none() {
+                    if let Ok(mut entry) = world.entry_mut(load_button_entity) {
+                        // highlight the load_button when hovering file
+                        if input.hover_file {
+                            if let Ok(button) = entry.get_component_mut::<StateButton>() {
+                                button.update_with_input(true, false);
+                            }
                         }
-                    }
-                    if let Some(path) = input.drop_file.take() {
-                        log::info!("loading {:?}", path);
-                        command.insert(
-                            (),
-                            vec![(AudioBufferLoader::load(path), Spawner(load_button_entity))],
-                        );
+                        if let Some(path) = input.drop_file.take() {
+                            match path.into_os_string().into_string() {
+                                Err(e) => {
+                                    log::error!("dropped file has invalid path: {:?}", e);
+                                }
+                                Ok(path) => {
+                                    log::info!("loading {:?}", path);
+                                    **loader = Some(AudioLoader {
+                                        loader: AudioBufferLoader::load(path.clone()),
+                                        path: path.clone(),
+                                        load_button_entity,
+                                    });
 
-                        if let Some(mut self_fn) =
-                            world.get_component_mut::<ButtonFn>(load_button_entity)
-                        {
-                            *self_fn = Arc::clone(&funcs.stop_load_fn);
-                        }
+                                    if let Ok(self_fn) = entry.get_component_mut::<ButtonFn>() {
+                                        *self_fn = Arc::clone(&funcs.stop_load_fn);
+                                    }
 
-                        if let Some(mut colors) =
-                            world.get_component_mut::<ButtonColors>(load_button_entity)
-                        {
-                            *colors = LOADING_BUTTON_COLOR;
-                        }
+                                    if let Ok(colors) = entry.get_component_mut::<ButtonColors>() {
+                                        *colors = LOADING_BUTTON_COLOR;
+                                    }
 
-                        if let Some(mut slider) =
-                            world.get_component_mut::<Slider>(load_button_entity)
-                        {
-                            slider.set_value(0.0);
-                        }
+                                    if let Ok(slider) = entry.get_component_mut::<Slider>() {
+                                        slider.set_value(0.0);
+                                    }
 
-                        if let Some(mut target_value) =
-                            world.get_component_mut::<TargetValue>(load_button_entity)
-                        {
-                            target_value.0 = 0.0;
+                                    if let Ok(mut target_value) =
+                                        entry.get_component_mut::<TargetValue>()
+                                    {
+                                        target_value.0 = 0.0;
+                                    }
+                                }
+                            }
                         }
                     }
                 } else {
@@ -722,24 +700,24 @@ fn main() -> Result<(), String> {
                 }
             });
 
-        let execute_button = Box::new(|world: &mut World| {
-            let query = <(Read<StateButton>, Read<ButtonFn>)>::query();
+        let execute_button = Box::new(|world: &mut World, res: &mut Resources| {
+            let mut query = <(Entity, Read<StateButton>, Read<ButtonFn>)>::query();
             let mut funcs_entities = Vec::new();
             // collect funcs to call
-            for (entity, (button, func)) in query.iter_entities(world) {
+            for (entity, button, func) in query.iter(world) {
                 if let Some(response) = button.get_response() {
                     match response {
                         ButtonResponse::Hover => {}
                         ButtonResponse::Unhover => {}
                         ButtonResponse::Press => {}
                         ButtonResponse::Release => {
-                            funcs_entities.push((Arc::clone(&func), entity));
+                            funcs_entities.push((Arc::clone(&func), *entity));
                         }
                     }
                 }
             }
             for (func, entity) in funcs_entities {
-                func(world, entity);
+                func(world, res, entity);
             }
         });
         let schedule = Schedule::builder()
@@ -753,7 +731,7 @@ fn main() -> Result<(), String> {
             .flush()
             .add_thread_local_fn(execute_button)
             .build();
-        (universe, world, schedule)
+        (world, resources, schedule)
     };
 
     // MARK: run
@@ -765,6 +743,7 @@ fn main() -> Result<(), String> {
             event_loop::ControlFlow,
         };
         *control_flow = ControlFlow::Poll;
+
         match event {
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
                 let now = std::time::Instant::now();
@@ -778,19 +757,20 @@ fn main() -> Result<(), String> {
             Event::WindowEvent {
                 window_id,
                 event: WindowEvent::CursorMoved { position, .. },
-            } if window_id == window.id() => {
-                let inner_size = window.inner_size();
+            } if window_id == resources.get::<winit::window::Window>().unwrap().id() => {
+                let inner_size = resources
+                    .get::<winit::window::Window>()
+                    .unwrap()
+                    .inner_size();
                 let x = (position.x as f32 / inner_size.width as f32) * 2.0 - 1.0;
                 let y = 1.0 - (position.y as f32 / inner_size.height as f32) * 2.0;
-                use legion::{query::Write, resource::ResourceSet};
-                Write::<Input>::fetch(&world.resources).mouse_location = Some((x, y));
+                resources.get_mut::<Input>().unwrap().mouse_location = Some((x, y));
             }
             Event::WindowEvent {
                 window_id,
                 event: WindowEvent::CursorLeft { .. },
-            } if window_id == window.id() => {
-                use legion::{query::Write, resource::ResourceSet};
-                Write::<Input>::fetch(&world.resources).mouse_location = None;
+            } if window_id == resources.get::<winit::window::Window>().unwrap().id() => {
+                resources.get_mut::<Input>().unwrap().mouse_location = None;
             }
             Event::WindowEvent {
                 window_id,
@@ -800,9 +780,8 @@ fn main() -> Result<(), String> {
                         button: winit::event::MouseButton::Left,
                         ..
                     },
-            } if window_id == window.id() => {
-                use legion::{query::Write, resource::ResourceSet};
-                let mouse_pressing = &mut Write::<Input>::fetch(&world.resources).mouse_pressing;
+            } if window_id == resources.get::<winit::window::Window>().unwrap().id() => {
+                let mouse_pressing = &mut resources.get_mut::<Input>().unwrap().mouse_pressing;
                 match state {
                     winit::event::ElementState::Pressed => *mouse_pressing = true,
                     winit::event::ElementState::Released => *mouse_pressing = false,
@@ -821,16 +800,15 @@ fn main() -> Result<(), String> {
                             },
                         ..
                     },
-            } if window_id == window.id() => {
+            } if window_id == resources.get::<winit::window::Window>().unwrap().id() => {
                 use winit::event::VirtualKeyCode;
                 match keycode {
                     VirtualKeyCode::Escape => {
                         *control_flow = ControlFlow::Exit;
                     }
                     VirtualKeyCode::LControl | VirtualKeyCode::RControl => {
-                        use legion::{query::Write, resource::ResourceSet};
                         let ctrl_pressing =
-                            &mut Write::<Input>::fetch(&world.resources).ctrl_pressing;
+                            &mut resources.get_mut::<Input>().unwrap().ctrl_pressing;
                         match state {
                             winit::event::ElementState::Pressed => *ctrl_pressing = true,
                             winit::event::ElementState::Released => *ctrl_pressing = false,
@@ -842,53 +820,52 @@ fn main() -> Result<(), String> {
             Event::WindowEvent {
                 window_id,
                 event: WindowEvent::HoveredFile(_),
-            } if window_id == window.id() => {
-                use legion::{query::Write, resource::ResourceSet};
-                Write::<Input>::fetch(&world.resources).hover_file = true;
+            } if window_id == resources.get::<winit::window::Window>().unwrap().id() => {
+                resources.get_mut::<Input>().unwrap().hover_file = true;
             }
             Event::WindowEvent {
                 window_id,
                 event: WindowEvent::HoveredFileCancelled,
-            } if window_id == window.id() => {
-                use legion::{query::Write, resource::ResourceSet};
-                Write::<Input>::fetch(&world.resources).hover_file = false;
+            } if window_id == resources.get::<winit::window::Window>().unwrap().id() => {
+                resources.get_mut::<Input>().unwrap().hover_file = false;
             }
             Event::WindowEvent {
                 window_id,
                 event: WindowEvent::DroppedFile(path),
-            } if window_id == window.id() => {
-                use legion::{query::Write, resource::ResourceSet};
-                let mut input = Write::<Input>::fetch(&world.resources);
+            } if window_id == resources.get::<winit::window::Window>().unwrap().id() => {
+                let mut input = resources.get_mut::<Input>().unwrap();
                 input.drop_file = Some(path);
                 input.hover_file = false;
             }
             Event::WindowEvent {
                 window_id,
                 event: WindowEvent::Resized(size),
-            } if window_id == window.id() => {
-                renderer.resize(size);
+            } if window_id == resources.get::<winit::window::Window>().unwrap().id() => {
+                resources.get_mut::<Renderer>().unwrap().resize(size);
             }
             Event::MainEventsCleared if should_tick => {
-                schedule.execute(&mut world);
-                use legion::{query::Read, resource::ResourceSet};
-                if Read::<Input>::fetch(&world.resources).exit {
+                schedule.execute(&mut world, &mut resources);
+                if resources.get::<Input>().unwrap().exit {
                     *control_flow = ControlFlow::Exit;
                 } else {
-                    window.request_redraw();
+                    resources
+                        .get::<winit::window::Window>()
+                        .unwrap()
+                        .request_redraw();
                 }
             }
-            Event::RedrawRequested(window_id) if window_id == window.id() => {
+            Event::RedrawRequested(window_id)
+                if window_id == resources.get::<winit::window::Window>().unwrap().id() =>
+            {
                 let mut transforms = Vec::new();
                 {
-                    use legion::query::{IntoQuery, Read};
                     for (_, transform) in
-                        <(Read<StateButton>, Read<Transform>)>::query().iter_immutable(&world)
+                        <(Read<StateButton>, Read<Transform>)>::query().iter(&world)
                     {
                         transforms.push(*transform);
                     }
                     for (slider, slider_colors, transform) in
-                        <(Read<Slider>, Read<SliderColors>, Read<Transform>)>::query()
-                            .iter_immutable(&world)
+                        <(Read<Slider>, Read<SliderColors>, Read<Transform>)>::query().iter(&world)
                     {
                         let progress = Transform {
                             location: [transform.location[0], transform.location[1]],
@@ -901,7 +878,11 @@ fn main() -> Result<(), String> {
                         transforms.push(progress);
                     }
                 }
-                if let Err(e) = renderer.render(&transforms, &render_pipeline) {
+                if let Err(e) = resources
+                    .get_mut::<Renderer>()
+                    .unwrap()
+                    .render(&transforms, &render_pipeline)
+                {
                     log::error!("render error: {}", e);
                 }
             }
@@ -943,42 +924,73 @@ fn smooth_to(current_value: f32, target_value: f32, change_speed: f32) -> f32 {
 
 mod function {
     use super::LOADING_BUTTON_COLOR;
-    use legion::{entity::Entity, query::Read, resource::ResourceSet, world::World};
-    use std::{
-        fmt::Debug,
-        marker::{Send, Sync},
-    };
+    use legion::{Entity, Resources, World};
+    use std::{path::PathBuf, str::FromStr};
 
     use super::entity::{
-        audio::AudioBufferLoader, button::ButtonColors, slider::Slider, ButtonFn, ButtonFunctions,
-        Spawner, TargetValue,
+        button::ButtonColors,
+        resource::{audio::AudioBufferLoader, ButtonFunctions},
+        slider::Slider,
+        ButtonFn, TargetValue,
     };
-    pub fn load<P: AsRef<std::path::Path> + Debug + Sync + Send + 'static>(
+    use crate::entity::resource::audio::{AudioLoader, AudioLoaderRes};
+
+    pub fn execute_or_relative_path(path: &str) -> Result<PathBuf, String> {
+        if let Ok(relative_path) = PathBuf::from_str(path) {
+            if relative_path.is_absolute() {
+                return Ok(relative_path);
+            }
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(exe_path) = exe.parent() {
+                    let exe_path = exe_path.join(relative_path.clone());
+                    if exe_path.exists() {
+                        return Ok(exe_path);
+                    }
+                }
+            }
+            Ok(relative_path)
+        } else {
+            Err("not a valid path".to_string())
+        }
+    }
+    pub fn load_music(
         world: &mut World,
-        self_entity: Entity,
-        file_path: P,
+        res: &Resources,
+        load_button_entity: Entity,
+        path: &String,
     ) {
-        log::info!("loading {:?}", file_path);
-        world.insert(
-            (),
-            vec![(AudioBufferLoader::load(file_path), Spawner(self_entity))],
-        );
+        let path_buf = execute_or_relative_path(path);
+        match path_buf {
+            Err(e) => {
+                log::error!("error on getting path {}", e);
+            }
+            Ok(path_buf) => {
+                log::info!("loading {:?}", path_buf);
+                let mut loader = res.get_mut::<AudioLoaderRes>().unwrap();
+                *loader = Some(AudioLoader {
+                    loader: AudioBufferLoader::load(path_buf),
+                    path: path.clone(),
+                    load_button_entity,
+                });
+                let stop_load_fn = &res.get::<ButtonFunctions>().unwrap().stop_load_fn;
+                if let Some(mut entry) = world.entry(load_button_entity) {
+                    if let Ok(self_fn) = entry.get_component_mut::<ButtonFn>() {
+                        *self_fn = std::sync::Arc::clone(stop_load_fn);
+                    }
 
-        let stop_load_fn = &Read::<ButtonFunctions>::fetch(&world.resources).stop_load_fn;
-        if let Some(mut self_fn) = world.get_component_mut::<ButtonFn>(self_entity) {
-            *self_fn = std::sync::Arc::clone(stop_load_fn);
-        }
+                    if let Ok(colors) = entry.get_component_mut::<ButtonColors>() {
+                        *colors = LOADING_BUTTON_COLOR;
+                    }
 
-        if let Some(mut colors) = world.get_component_mut::<ButtonColors>(self_entity) {
-            *colors = LOADING_BUTTON_COLOR;
-        }
+                    if let Ok(slider) = entry.get_component_mut::<Slider>() {
+                        slider.set_value(0.0);
+                    }
 
-        if let Some(mut slider) = world.get_component_mut::<Slider>(self_entity) {
-            slider.set_value(0.0);
-        }
-
-        if let Some(mut target_value) = world.get_component_mut::<TargetValue>(self_entity) {
-            target_value.0 = 0.0;
+                    if let Ok(mut target_value) = entry.get_component_mut::<TargetValue>() {
+                        target_value.0 = 0.0;
+                    }
+                }
+            }
         }
     }
 }

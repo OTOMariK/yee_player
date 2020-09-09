@@ -1,4 +1,6 @@
 (
+    // path to your music file  音乐文件路径
+    music_path: "asset/music/example.ogg",
     // width of the window  窗口的宽度
     window_width: 512.0,
     // height of the window  窗口的高度
