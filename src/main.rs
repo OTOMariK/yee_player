@@ -59,6 +59,28 @@ fn main() -> Result<(), String> {
         .filter_level(log::LevelFilter::Error)
         .filter_module("yee_player", log::LevelFilter::Trace)
         .init();
+
+    // use another thread to create the OutputStream of rodio. avoid winit conflict.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let (sender_end, receiver_end) = std::sync::mpsc::channel();
+    let _audio_stream_thread = std::thread::spawn(move || {
+        let (_stream, stream_handle) = match rodio::OutputStream::try_default() {
+            Err(e) => {
+                let error_msg = format!("error getting default OutputStream: {:?}", e);
+                sender.send(Err(error_msg)).unwrap();
+                return;
+            }
+            Ok(output) => output,
+        };
+        sender.send(Ok(stream_handle)).unwrap();
+        drop(sender);
+        receiver_end.recv().unwrap();
+        log::info!("audio_stream_thread end");
+    });
+
+    let stream_handle = receiver.recv().unwrap()?;
+    drop(receiver);
+
     let fs_path: PathBuf = function::execute_or_relative_path("./asset/shader/frag.glsl.spv")?;
     let vs_path: PathBuf = function::execute_or_relative_path("./asset/shader/vert.glsl.spv")?;
     let setting_path =
@@ -68,7 +90,9 @@ fn main() -> Result<(), String> {
     let event_loop = winit::event_loop::EventLoop::new();
 
     let (window, size) = {
-        let window = winit::window::WindowBuilder::new()
+        let winit_window_builder = winit::window::WindowBuilder::new();
+
+        let window = winit_window_builder
             .with_title("yee player")
             .with_inner_size(winit::dpi::LogicalSize {
                 width: setting.window_width,
@@ -82,7 +106,13 @@ fn main() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let center_position = {
             let window_size = window.outer_size();
-            let srceen_size = window.current_monitor().size();
+            let srceen_size = {
+                if let Some(monitor) = window.current_monitor() {
+                    monitor.size()
+                } else {
+                    window_size
+                }
+            };
             winit::dpi::PhysicalPosition::new(
                 (srceen_size.width - window_size.width) / 2,
                 (srceen_size.height - window_size.height) / 2,
@@ -100,10 +130,6 @@ fn main() -> Result<(), String> {
         vertex_shader_path: vs_path,
         fragment_shader_path: fs_path,
     })?;
-
-    let audio_device = Arc::new(buffer_player::create_on_other_thread(|| -> _ {
-        rodio::default_output_device().ok_or("can not get default audio output device!".to_string())
-    })?);
 
     let (mut world, mut resources, mut schedule) = {
         let mut world = World::default();
@@ -355,7 +381,10 @@ fn main() -> Result<(), String> {
         resources.insert(setting);
         resources.insert::<MusicFileMetaData>(None);
         // controller
-        resources.insert(AudioController::new_with_buffer(audio_device, empty_buffer));
+        resources.insert(AudioController::new_with_buffer(
+            &stream_handle,
+            empty_buffer,
+        ));
         let controlled_sliders = ControlledSliders {
             time_slider: slider_entities[0],
             speed_slider: slider_entities[1],
@@ -897,6 +926,7 @@ fn main() -> Result<(), String> {
                 ..
             } => *control_flow = ControlFlow::Exit,
             Event::LoopDestroyed => {
+                sender_end.send(()).unwrap();
                 log::info!("exit");
             }
             _ => {}

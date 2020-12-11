@@ -1,4 +1,4 @@
-use rodio::{source::Source, Decoder, Device, Sample};
+use rodio::{source::Source, Decoder, OutputStreamHandle, Sample};
 use std::{
     path::Path,
     sync::{Arc, RwLock},
@@ -41,9 +41,9 @@ where
 
         SamplesBuffer {
             data,
-            channels: channels,
-            sample_rate: sample_rate,
-            duration: duration,
+            channels,
+            sample_rate,
+            duration,
         }
     }
 
@@ -53,35 +53,26 @@ where
 }
 
 impl SamplesBuffer<i16> {
-    pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let decoder = Decoder::new(
-            std::fs::File::open(path).map_err(|e| format!("error opening file: {:?}", e))?,
-        )
-        .map_err(|e| format!("error creating audio decoder: {:?}", e))?;
-
-        let channels = decoder.channels();
-        let sample_rate = decoder.sample_rate();
-
-        let data = decoder.collect::<Vec<_>>();
-
-        Ok(Self::new(channels, sample_rate, data))
-    }
-
     pub fn load_from_file_async_stoppable<P: AsRef<Path>>(
         path: P,
         stop_loading: Arc<RwLock<bool>>,
         progress: Arc<RwLock<f32>>,
     ) -> Result<Self, String> {
-        let mut decoder = Decoder::new(
+        let mut decoder = Decoder::new(std::io::BufReader::new(
             std::fs::File::open(path).map_err(|e| format!("error opening file: {:?}", e))?,
-        )
+        ))
         .map_err(|e| format!("error decode audio: {:?}", e))?;
 
         let channels = decoder.channels();
         let sample_rate = decoder.sample_rate();
 
-        let mut data = Vec::new();
         let possible_data_duration = decoder.total_duration();
+
+        let mut data = match decoder.size_hint().1 {
+            Some(size) => Vec::with_capacity(size),
+            None => Vec::new(),
+        };
+
         let mut decoded = Duration::from_secs(0);
         loop {
             let frame_len = decoder.current_frame_len();
@@ -364,9 +355,11 @@ where
         }
     }
 
-    pub fn new_with_buffer(audio_device: Arc<Device>, buffer: Arc<SamplesBuffer<S>>) -> Self {
-        let sink =
-            create_on_other_thread(move || -> _ { Ok(rodio::Sink::new(&audio_device)) }).unwrap();
+    pub fn new_with_buffer(
+        audio_device: &OutputStreamHandle,
+        buffer: Arc<SamplesBuffer<S>>,
+    ) -> Self {
+        let sink = rodio::Sink::try_new(&audio_device).unwrap();
         let controller = Self::new(sink, Arc::clone(&buffer));
         let (target_buffer2, changed_time2, time2, speed2, loop_mode2) = (
             Arc::clone(&controller.changed_target_buffer),
@@ -454,13 +447,4 @@ where
         let mut dst = self.loop_mode.write().unwrap();
         *dst = loop_mode;
     }
-}
-
-pub fn create_on_other_thread<T, F>(method: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: Fn() -> Result<T, String> + Send + 'static,
-{
-    let thread = std::thread::spawn(move || -> Result<T, String> { method() });
-    thread.join().unwrap()
 }
