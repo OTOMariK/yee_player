@@ -1,8 +1,12 @@
 [package]
 name = "yee_player"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["OTOMariK"]
 edition = "2018"
+
+[profile.release]
+lto = true
+panic = 'abort'
 
 [dependencies]
 log = "0.4"
@@ -10,9 +14,9 @@ env_logger = "0.8"
 
 winit = "0.24"
 raw-window-handle = "0.3"
-wgpu = "0.6"
+wgpu = "0.7"
 
-legion = "0.3"
+legion = "0.4"
 
 rodio = "0.13"
 
@@ -21,3 +25,6 @@ ron = "0.6"
 zerocopy= "0.3"
 
 futures="0.3"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"

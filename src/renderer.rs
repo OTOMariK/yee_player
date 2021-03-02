@@ -49,8 +49,7 @@ use std::path::PathBuf;
 use wgpu::util::DeviceExt;
 
 pub struct PiplineSetting {
-    pub vertex_shader_path: PathBuf,
-    pub fragment_shader_path: PathBuf,
+    pub shader_path: PathBuf,
 }
 
 pub struct Renderer {
@@ -76,16 +75,16 @@ impl Renderer {
 
         let adapter =
             futures::executor::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::Default,
-                compatible_surface: None,
+                power_preference: Default::default(),
+                compatible_surface: Some(&surface),
             }))
             .ok_or("no adapter found!")?;
 
         let (device, queue) = futures::executor::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
+                label: None,
                 features: wgpu::Features::empty(),
                 limits: wgpu::Limits::default(),
-                shader_validation: true,
             },
             None,
         ))
@@ -102,7 +101,7 @@ impl Renderer {
         });
 
         let swap_chain_desc = wgpu::SwapChainDescriptor {
-            usage: wgpu::TextureUsage::OUTPUT_ATTACHMENT,
+            usage: wgpu::TextureUsage::RENDER_ATTACHMENT,
             format: wgpu::TextureFormat::Bgra8Unorm,
             width: size.width,
             height: size.height,
@@ -150,16 +149,15 @@ impl Renderer {
         &self,
         setting: &PiplineSetting,
     ) -> Result<wgpu::RenderPipeline, String> {
-        let (vs_module, fs_module) = {
-            let vs_file = std::fs::read(&setting.vertex_shader_path).map_err(|e| e.to_string())?;
-            let vs = wgpu::util::make_spirv(&vs_file);
-            let vs_module = self.device.create_shader_module(vs);
-
-            let fs_file =
-                std::fs::read(&setting.fragment_shader_path).map_err(|e| e.to_string())?;
-            let fs = wgpu::util::make_spirv(&fs_file);
-            let fs_module = self.device.create_shader_module(fs);
-            (vs_module, fs_module)
+        let shader_module = {
+            let source_string =
+                std::fs::read_to_string(&setting.shader_path).map_err(|e| e.to_string())?;
+            self.device
+                .create_shader_module(&wgpu::ShaderModuleDescriptor {
+                    label: None,
+                    source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(&source_string)),
+                    flags: wgpu::ShaderFlags::all(),
+                })
         };
 
         let pipeline_layout = self
@@ -174,63 +172,41 @@ impl Renderer {
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: None,
                 layout: Some(&pipeline_layout),
-                vertex_stage: wgpu::ProgrammableStageDescriptor {
-                    module: &vs_module,
-                    entry_point: "main",
-                },
-                fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
-                    module: &fs_module,
-                    entry_point: "main",
-                }),
-                rasterization_state: Some(wgpu::RasterizationStateDescriptor {
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: wgpu::CullMode::None,
-                    clamp_depth: false,
-                    depth_bias: 0,
-                    depth_bias_slope_scale: 0.0,
-                    depth_bias_clamp: 0.0,
-                }),
-                primitive_topology: wgpu::PrimitiveTopology::TriangleList,
-                color_states: &[wgpu::ColorStateDescriptor {
-                    format: wgpu::TextureFormat::Bgra8Unorm,
-                    color_blend: wgpu::BlendDescriptor::REPLACE,
-                    alpha_blend: wgpu::BlendDescriptor::REPLACE,
-                    write_mask: wgpu::ColorWrite::ALL,
-                }],
-                vertex_state: wgpu::VertexStateDescriptor {
-                    index_format: wgpu::IndexFormat::Uint16,
-                    vertex_buffers: &[
-                        wgpu::VertexBufferDescriptor {
-                            stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                vertex: wgpu::VertexState {
+                    module: &shader_module,
+                    entry_point: "vs_main",
+                    buffers: &[
+                        wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
                             step_mode: wgpu::InputStepMode::Vertex,
                             attributes: &[
-                                wgpu::VertexAttributeDescriptor {
+                                wgpu::VertexAttribute {
                                     offset: 0,
                                     format: wgpu::VertexFormat::Float2,
                                     shader_location: 0,
                                 },
-                                wgpu::VertexAttributeDescriptor {
+                                wgpu::VertexAttribute {
                                     offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
                                     format: wgpu::VertexFormat::Float2,
                                     shader_location: 1,
                                 },
                             ],
                         },
-                        wgpu::VertexBufferDescriptor {
-                            stride: std::mem::size_of::<Transform>() as wgpu::BufferAddress,
+                        wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<Transform>() as wgpu::BufferAddress,
                             step_mode: wgpu::InputStepMode::Instance,
                             attributes: &[
-                                wgpu::VertexAttributeDescriptor {
+                                wgpu::VertexAttribute {
                                     offset: 0,
                                     format: wgpu::VertexFormat::Float2,
                                     shader_location: 2,
                                 },
-                                wgpu::VertexAttributeDescriptor {
+                                wgpu::VertexAttribute {
                                     offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
                                     format: wgpu::VertexFormat::Float2,
                                     shader_location: 3,
                                 },
-                                wgpu::VertexAttributeDescriptor {
+                                wgpu::VertexAttribute {
                                     offset: (std::mem::size_of::<[f32; 2]>()
                                         + std::mem::size_of::<[f32; 2]>())
                                         as wgpu::BufferAddress,
@@ -241,10 +217,14 @@ impl Renderer {
                         },
                     ],
                 },
-                depth_stencil_state: None,
-                sample_count: 1,
-                sample_mask: !0,
-                alpha_to_coverage_enabled: false,
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_module,
+                    entry_point: "fs_main",
+                    targets: &[self.swap_chain_desc.format.into()],
+                }),
             }))
     }
 
@@ -272,6 +252,7 @@ impl Renderer {
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
                 color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
                     attachment: &frame.view,
                     resolve_target: None,
@@ -286,7 +267,7 @@ impl Renderer {
             render_pass.set_bind_group(0, &self.bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_vertex_buffer(1, transform_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..));
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..INDECES.len() as u32, 0, 0..transforms.len() as u32);
         }
         self.queue.submit(Some(encoder.finish()));

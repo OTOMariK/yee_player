@@ -1,4 +1,4 @@
-// #![windows_subsystem = "windows"]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -81,8 +81,7 @@ fn main() -> Result<(), String> {
     let stream_handle = receiver.recv().unwrap()?;
     drop(receiver);
 
-    let fs_path: PathBuf = function::execute_or_relative_path("./asset/shader/frag.glsl.spv")?;
-    let vs_path: PathBuf = function::execute_or_relative_path("./asset/shader/vert.glsl.spv")?;
+    let shader_path: PathBuf = function::execute_or_relative_path("./asset/shader/shader.wgsl")?;
     let setting_path =
         SettingPath(function::execute_or_relative_path("./asset/setting/setting.ron").unwrap());
     let setting = Setting::load(&setting_path.0).unwrap_or_default();
@@ -126,10 +125,7 @@ fn main() -> Result<(), String> {
     };
 
     let renderer = Renderer::init(&window, size)?;
-    let render_pipeline = renderer.create_render_pipline(&PiplineSetting {
-        vertex_shader_path: vs_path,
-        fragment_shader_path: fs_path,
-    })?;
+    let render_pipeline = renderer.create_render_pipline(&PiplineSetting { shader_path })?;
 
     let (mut world, mut resources, mut schedule) = {
         let mut world = World::default();
@@ -870,7 +866,9 @@ fn main() -> Result<(), String> {
                 window_id,
                 event: WindowEvent::Resized(size),
             } if window_id == resources.get::<winit::window::Window>().unwrap().id() => {
-                resources.get_mut::<Renderer>().unwrap().resize(size);
+                if size.width & size.height != 0 {
+                    resources.get_mut::<Renderer>().unwrap().resize(size);
+                }
             }
             Event::MainEventsCleared if should_tick => {
                 schedule.execute(&mut world, &mut resources);
@@ -886,33 +884,40 @@ fn main() -> Result<(), String> {
             Event::RedrawRequested(window_id)
                 if window_id == resources.get::<winit::window::Window>().unwrap().id() =>
             {
-                let mut transforms = Vec::new();
-                {
-                    for (_, transform) in
-                        <(Read<StateButton>, Read<Transform>)>::query().iter(&world)
-                    {
-                        transforms.push(*transform);
-                    }
-                    for (slider, slider_colors, transform) in
-                        <(Read<Slider>, Read<SliderColors>, Read<Transform>)>::query().iter(&world)
-                    {
-                        let progress = Transform {
-                            location: [transform.location[0], transform.location[1]],
-                            size: [
-                                transform.size[0] * slider.get_value_mapped(),
-                                transform.size[1],
-                            ],
-                            color: slider_colors.current_color,
-                        };
-                        transforms.push(progress);
-                    }
-                }
-                if let Err(e) = resources
-                    .get_mut::<Renderer>()
+                let inner_size = resources
+                    .get::<winit::window::Window>()
                     .unwrap()
-                    .render(&transforms, &render_pipeline)
-                {
-                    log::error!("render error: {}", e);
+                    .inner_size();
+                if inner_size.width & inner_size.height != 0 {
+                    let mut transforms = Vec::new();
+                    {
+                        for (_, transform) in
+                            <(Read<StateButton>, Read<Transform>)>::query().iter(&world)
+                        {
+                            transforms.push(*transform);
+                        }
+                        for (slider, slider_colors, transform) in
+                            <(Read<Slider>, Read<SliderColors>, Read<Transform>)>::query()
+                                .iter(&world)
+                        {
+                            let progress = Transform {
+                                location: [transform.location[0], transform.location[1]],
+                                size: [
+                                    transform.size[0] * slider.get_value_mapped(),
+                                    transform.size[1],
+                                ],
+                                color: slider_colors.current_color,
+                            };
+                            transforms.push(progress);
+                        }
+                    }
+                    if let Err(e) = resources
+                        .get_mut::<Renderer>()
+                        .unwrap()
+                        .render(&transforms, &render_pipeline)
+                    {
+                        log::error!("render error: {}", e);
+                    }
                 }
             }
             Event::RedrawEventsCleared => {
