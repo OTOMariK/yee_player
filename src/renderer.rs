@@ -182,12 +182,12 @@ impl Renderer {
                             attributes: &[
                                 wgpu::VertexAttribute {
                                     offset: 0,
-                                    format: wgpu::VertexFormat::Float2,
+                                    format: wgpu::VertexFormat::Float32x2,
                                     shader_location: 0,
                                 },
                                 wgpu::VertexAttribute {
                                     offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                                    format: wgpu::VertexFormat::Float2,
+                                    format: wgpu::VertexFormat::Float32x2,
                                     shader_location: 1,
                                 },
                             ],
@@ -198,19 +198,19 @@ impl Renderer {
                             attributes: &[
                                 wgpu::VertexAttribute {
                                     offset: 0,
-                                    format: wgpu::VertexFormat::Float2,
+                                    format: wgpu::VertexFormat::Float32x2,
                                     shader_location: 2,
                                 },
                                 wgpu::VertexAttribute {
                                     offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                                    format: wgpu::VertexFormat::Float2,
+                                    format: wgpu::VertexFormat::Float32x2,
                                     shader_location: 3,
                                 },
                                 wgpu::VertexAttribute {
                                     offset: (std::mem::size_of::<[f32; 2]>()
                                         + std::mem::size_of::<[f32; 2]>())
                                         as wgpu::BufferAddress,
-                                    format: wgpu::VertexFormat::Float3,
+                                    format: wgpu::VertexFormat::Float32x3,
                                     shader_location: 4,
                                 },
                             ],
@@ -253,8 +253,8 @@ impl Renderer {
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
-                color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
-                    attachment: &frame.view,
+                color_attachments: &[wgpu::RenderPassColorAttachment {
+                    view: &frame.view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
