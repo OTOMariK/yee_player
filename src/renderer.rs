@@ -57,8 +57,7 @@ pub struct Renderer {
     _adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    swap_chain_desc: wgpu::SwapChainDescriptor,
-    swap_chain: wgpu::SwapChain,
+    surface_config: wgpu::SurfaceConfiguration,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -70,7 +69,7 @@ impl Renderer {
         window: &W,
         size: winit::dpi::PhysicalSize<u32>,
     ) -> Result<Self, String> {
-        let instance = wgpu::Instance::new(wgpu::BackendBit::PRIMARY);
+        let instance = wgpu::Instance::new(wgpu::Backends::all());
         let surface = unsafe { instance.create_surface(window) };
 
         let adapter =
@@ -100,25 +99,26 @@ impl Renderer {
             entries: &[],
         });
 
-        let swap_chain_desc = wgpu::SwapChainDescriptor {
-            usage: wgpu::TextureUsage::RENDER_ATTACHMENT,
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: wgpu::TextureFormat::Bgra8Unorm,
             width: size.width,
             height: size.height,
             present_mode: wgpu::PresentMode::Mailbox,
         };
-        let swap_chain = device.create_swap_chain(&surface, &swap_chain_desc);
+        surface.configure(&device, &surface_config);
+
         let (vertex_buffer, index_buffer) = {
             let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("vertex buffer"),
                 contents: VERTEX.as_bytes(),
-                usage: wgpu::BufferUsage::VERTEX,
+                usage: wgpu::BufferUsages::VERTEX,
             });
 
             let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("index buffer"),
                 contents: INDECES.as_bytes(),
-                usage: wgpu::BufferUsage::INDEX,
+                usage: wgpu::BufferUsages::INDEX,
             });
             (vb, ib)
         };
@@ -128,8 +128,7 @@ impl Renderer {
             _adapter: adapter,
             device,
             queue,
-            swap_chain_desc,
-            swap_chain,
+            surface_config,
             vertex_buffer,
             index_buffer,
             bind_group,
@@ -138,11 +137,9 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
-        self.swap_chain_desc.width = size.width;
-        self.swap_chain_desc.height = size.height;
-        self.swap_chain = self
-            .device
-            .create_swap_chain(&self.surface, &self.swap_chain_desc);
+        self.surface_config.width = size.width;
+        self.surface_config.height = size.height;
+        self.surface.configure(&self.device, &self.surface_config);
     }
 
     pub fn create_render_pipline(
@@ -156,7 +153,6 @@ impl Renderer {
                 .create_shader_module(&wgpu::ShaderModuleDescriptor {
                     label: None,
                     source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(&source_string)),
-                    flags: wgpu::ShaderFlags::all(),
                 })
         };
 
@@ -178,7 +174,7 @@ impl Renderer {
                     buffers: &[
                         wgpu::VertexBufferLayout {
                             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                            step_mode: wgpu::InputStepMode::Vertex,
+                            step_mode: wgpu::VertexStepMode::Vertex,
                             attributes: &[
                                 wgpu::VertexAttribute {
                                     offset: 0,
@@ -194,7 +190,7 @@ impl Renderer {
                         },
                         wgpu::VertexBufferLayout {
                             array_stride: std::mem::size_of::<Transform>() as wgpu::BufferAddress,
-                            step_mode: wgpu::InputStepMode::Instance,
+                            step_mode: wgpu::VertexStepMode::Instance,
                             attributes: &[
                                 wgpu::VertexAttribute {
                                     offset: 0,
@@ -223,7 +219,7 @@ impl Renderer {
                 fragment: Some(wgpu::FragmentState {
                     module: &shader_module,
                     entry_point: "fs_main",
-                    targets: &[self.swap_chain_desc.format.into()],
+                    targets: &[self.surface_config.format.into()],
                 }),
             }))
     }
@@ -234,7 +230,7 @@ impl Renderer {
         render_pipeline: &wgpu::RenderPipeline,
     ) -> Result<(), String> {
         let frame = self
-            .swap_chain
+            .surface
             .get_current_frame()
             .map_err(|e| format!("{:?}", e))?
             .output;
@@ -247,14 +243,17 @@ impl Renderer {
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("transforms buffer"),
                 contents: transforms.as_bytes(),
-                usage: wgpu::BufferUsage::VERTEX,
+                usage: wgpu::BufferUsages::VERTEX,
             });
 
         {
+            let view = frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
                 color_attachments: &[wgpu::RenderPassColorAttachment {
-                    view: &frame.view,
+                    view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
