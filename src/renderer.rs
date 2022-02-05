@@ -76,6 +76,7 @@ impl Renderer {
             futures::executor::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: Default::default(),
                 compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
             }))
             .ok_or("no adapter found!")?;
 
@@ -221,6 +222,7 @@ impl Renderer {
                     entry_point: "fs_main",
                     targets: &[self.surface_config.format.into()],
                 }),
+                multiview: None,
             }))
     }
 
@@ -231,9 +233,8 @@ impl Renderer {
     ) -> Result<(), String> {
         let frame = self
             .surface
-            .get_current_frame()
-            .map_err(|e| format!("{:?}", e))?
-            .output;
+            .get_current_texture()
+            .map_err(|e| format!("{:?}", e))?;
 
         let mut encoder = self
             .device
@@ -270,6 +271,7 @@ impl Renderer {
             render_pass.draw_indexed(0..INDECES.len() as u32, 0, 0..transforms.len() as u32);
         }
         self.queue.submit(Some(encoder.finish()));
+        frame.present();
         Ok(())
     }
 }

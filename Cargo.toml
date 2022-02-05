@@ -13,17 +13,17 @@ panic = 'abort'
 log = "0.4"
 env_logger = "0.9"
 
-winit = "0.25"
-raw-window-handle = "0.3"
-wgpu = "0.10"
+winit = "0.26"
+raw-window-handle = "0.4"
+wgpu = "0.12"
 
 legion = "0.4"
 
-rodio = "0.14"
+rodio = "0.15"
 
 serde= "*"
-ron = "0.6"
-zerocopy= "0.5"
+ron = "0.7"
+zerocopy= "0.6"
 
 futures="0.3"
 
